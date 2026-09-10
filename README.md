@@ -1,5 +1,7 @@
 # QCAA Word Count Tool
-#Note that this was made with Claude, I don't know how to state that because I'm new with using GitHub.
+**Note that this was made with Claude, I don't know how to state that because I'm new with using GitHub.**
+
+
 A script that estimates a QCAA-compliant word count for a `.docx` file, following
 the QCAA rules on what counts and what doesn't (headings, quotations, tables,
 footnotes, citations, appendixes, etc.) rather than just reporting Word's raw
