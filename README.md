@@ -34,6 +34,10 @@ genuinely need a human judgement call.
 - Correctly handles merged table cells (a common source of accidental
   over- or under-counting in naive word-count scripts)
 
+## It is based on the rules made by QCAA
+<img width="1226" height="885" alt="image" src="https://github.com/user-attachments/assets/163b1e06-057b-4608-8e43-4e066ed6ed44" />
+https://www.qcaa.qld.edu.au/senior/certificates-and-qualifications/qce-qcia-handbook/8-school-assessment-policies/8.2-integrating-learning-assessment
+
 ## What still needs your own judgement
 
 - Citations in a format the pattern-matcher doesn't recognise (it looks for
@@ -59,7 +63,7 @@ heading styles first.
 
 ## Installation
 
-Requires Python 3.8+.
+Requires Python 3.8+. I've used it on Thonny and VsCode, try it on one of those, but any Python 3.8 install with pip should work
 
 ```bash
 pip install -r requirements.txt
@@ -74,7 +78,7 @@ python qcaa_word_count.py "path/to/your/file.docx"
 ```
 
 Or run it with no argument and it will either open a file picker (if a
-graphical environment is available) or ask you to paste a path.
+graphical environment is available, best on Thonny and VsCode) or ask you to paste a path.
 
 The script will then interactively ask you about:
 - any typed-out citations it finds (confirm/reject each unique one)
