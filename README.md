@@ -91,7 +91,7 @@ Some exclusion/inclusion calls in the QCAA rules are genuinely subjective
 (e.g. whether a table counts as "raw/processed data" or "other information").
 Always sanity-check the final number, especially around tables, footnotes,
 and any citation style the pattern-matcher might not recognise.
-
+**This was also made with Claude AI**
 ## Contributing
 
 Issues and pull requests welcome — in particular around detecting
