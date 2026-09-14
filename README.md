@@ -1,5 +1,5 @@
-# QCAA Word Count Tool
-**Note that this was made with Claude, I don't know how to state that because I'm new with using GitHub.**
+# QCAA Word Count Tool - made with Claude and DeepSeek AI
+**Note that this was made with Claude and DeepSeek AI, I don't know how to state that because I'm new with using GitHub.**
 
 
 A script that estimates a QCAA-compliant word count for a `.docx` file, following
@@ -34,6 +34,10 @@ genuinely need a human judgement call.
 - Correctly handles merged table cells (a common source of accidental
   over- or under-counting in naive word-count scripts)
 
+## It is based on the rules made by QCAA
+<img width="1226" height="885" alt="image" src="https://github.com/user-attachments/assets/163b1e06-057b-4608-8e43-4e066ed6ed44" />
+https://www.qcaa.qld.edu.au/senior/certificates-and-qualifications/qce-qcia-handbook/8-school-assessment-policies/8.2-integrating-learning-assessment
+
 ## What still needs your own judgement
 
 - Citations in a format the pattern-matcher doesn't recognise (it looks for
@@ -59,7 +63,7 @@ heading styles first.
 
 ## Installation
 
-Requires Python 3.8+.
+Requires Python 3.8+. I've used it on Thonny and VsCode, try it on one of those, but any Python 3.8 install with pip should work
 
 ```bash
 pip install -r requirements.txt
@@ -74,7 +78,7 @@ python qcaa_word_count.py "path/to/your/file.docx"
 ```
 
 Or run it with no argument and it will either open a file picker (if a
-graphical environment is available) or ask you to paste a path.
+graphical environment is available, best on Thonny and VsCode) or ask you to paste a path.
 
 The script will then interactively ask you about:
 - any typed-out citations it finds (confirm/reject each unique one)
@@ -84,6 +88,47 @@ The script will then interactively ask you about:
 ...and finish with a full report: the estimated word count, a breakdown of
 what was excluded and why, and a per-heading breakdown of the final count.
 
+## Example results
+```bash
+================================================
+QCAA WORD COUNT REPORT
+================================================
+Word total incl. footnotes/endnotes:   1255
+Excluded:
+  Numbers/symbols:                       75
+  Citations (fields + confirmed typed):  26
+  Equations/calculations:                0
+  Bibliographic footnotes:               0
+  Bibliographic endnotes:                0
+  Data-only tables:                      0
+  Data-only figure inner-text:           0
+  Visual elements (captions/by-lines):   0
+  Title page:                            13
+  Contents/Abstract/Bibliography/Appx:   64
+  Manually marked:                       0
+------------------------------------------------
+ESTIMATED QCAA WORD COUNT: 1154
+================================================
+
+PAGE ESTIMATE: ~2 page(s) (portrait, ~612 body words/page).
+Word's own pagination will differ based on fonts, tables,
+images, breaks, and heading spacing — check against Word's
+status bar before relying on this figure.
+
+BREAKDOWN BY HEADING (counted words only, excluded sections marked):
+- Rationale:: 235 words
+- Modifications:: 74 words
+- Risk Management:: 140 words
+- Results:: 39 words
+- (untitled heading): 0 words
+- Analysis of Data:: 258 words
+- Evaluation:: 325 words
+- Conclusion:: 83 words
+- References:: 0 words  [excluded from count]
+
+Still check by eye: text inside images, unusual citation styles, SmartArt labels, and any custom reference-manager field codes.
+```
+
 ## Disclaimer
 
 This is an estimation tool, not an official QCAA word-count certification.
@@ -91,7 +136,7 @@ Some exclusion/inclusion calls in the QCAA rules are genuinely subjective
 (e.g. whether a table counts as "raw/processed data" or "other information").
 Always sanity-check the final number, especially around tables, footnotes,
 and any citation style the pattern-matcher might not recognise.
-**This was also made with Claude AI**
+**This was also made with Claude AI and DeepSeek AI**
 ## Contributing
 
 Issues and pull requests welcome — in particular around detecting
