@@ -88,6 +88,47 @@ The script will then interactively ask you about:
 ...and finish with a full report: the estimated word count, a breakdown of
 what was excluded and why, and a per-heading breakdown of the final count.
 
+## Example results
+```bash
+================================================
+QCAA WORD COUNT REPORT
+================================================
+Word total incl. footnotes/endnotes:   1255
+Excluded:
+  Numbers/symbols:                       75
+  Citations (fields + confirmed typed):  26
+  Equations/calculations:                0
+  Bibliographic footnotes:               0
+  Bibliographic endnotes:                0
+  Data-only tables:                      0
+  Data-only figure inner-text:           0
+  Visual elements (captions/by-lines):   0
+  Title page:                            13
+  Contents/Abstract/Bibliography/Appx:   64
+  Manually marked:                       0
+------------------------------------------------
+ESTIMATED QCAA WORD COUNT: 1154
+================================================
+
+PAGE ESTIMATE: ~2 page(s) (portrait, ~612 body words/page).
+Word's own pagination will differ based on fonts, tables,
+images, breaks, and heading spacing — check against Word's
+status bar before relying on this figure.
+
+BREAKDOWN BY HEADING (counted words only, excluded sections marked):
+- Rationale:: 235 words
+- Modifications:: 74 words
+- Risk Management:: 140 words
+- Results:: 39 words
+- (untitled heading): 0 words
+- Analysis of Data:: 258 words
+- Evaluation:: 325 words
+- Conclusion:: 83 words
+- References:: 0 words  [excluded from count]
+
+Still check by eye: text inside images, unusual citation styles, SmartArt labels, and any custom reference-manager field codes.
+```
+
 ## Disclaimer
 
 This is an estimation tool, not an official QCAA word-count certification.
