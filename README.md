@@ -1,5 +1,5 @@
 # QCAA Word Count Tool
-**Note that this was made with Claude, I don't know how to state that because I'm new with using GitHub.**
+**Note that this was made with Claude and DeepSeek AI, I don't know how to state that because I'm new with using GitHub.**
 
 
 A script that estimates a QCAA-compliant word count for a `.docx` file, following
@@ -91,7 +91,7 @@ Some exclusion/inclusion calls in the QCAA rules are genuinely subjective
 (e.g. whether a table counts as "raw/processed data" or "other information").
 Always sanity-check the final number, especially around tables, footnotes,
 and any citation style the pattern-matcher might not recognise.
-**This was also made with Claude AI**
+**This was also made with Claude AI and DeepSeek AI**
 ## Contributing
 
 Issues and pull requests welcome — in particular around detecting
