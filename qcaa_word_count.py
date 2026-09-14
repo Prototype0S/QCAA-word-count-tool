@@ -432,11 +432,22 @@ VANCOUVER_RE = re.compile(r"\[\d{1,3}(?:\s*[,\-\u2013]\s*\d{1,3})*\]")
 # multiplication/division/unit indicator. Symbolic forms like "n = m/M"
 # and "v = d/t" match; plain "x = y" in prose does not.
 EQUATION_RE = re.compile(
-    r"(?<![\w.])"
-    r"([A-Za-z\u0394\u03b4\u03b8\u03bb\u03bc\u03c3\u03c0])"
-    r"\s*([=\u2243\u2248])\s*"
-    r"([0-9][^\n.!?]{0,60}?|[A-Za-z0-9]+(?:\s*[/\u00d7*]\s*[A-Za-z0-9]+)+)"
-    r"(?=[.!?\n]|$)"
+    r"""
+    (?:
+        \b[A-Za-zΔα-ωΑ-Ω][A-Za-z0-9Δα-ωΑ-Ω_²³⁴⁵⁶⁷⁸⁹⁰]*\s*
+        (?:=|≈|≠|≤|≥|<|>)
+        \s*
+        [^\s,.;:]+
+    )
+    |
+    (?:
+        \b[A-Za-zΔα-ωΑ-Ω][A-Za-z0-9Δα-ωΑ-Ω_²³⁴⁵⁶⁷⁸⁹]*\s*
+        [*/÷×+−\-]
+        \s*
+        [A-Za-z0-9Δα-ωΑ-Ω_²³⁴⁵⁶⁷⁸⁹⁰]+
+    )
+    """,
+    re.VERBOSE
 )
 
 # Continuation line of a worked calculation: starts with "=" then an
@@ -1137,20 +1148,21 @@ def main():
     # not be subtracted again here. They're still displayed in the report
     # so you can see what was skipped.
     excluded = (
-        numeric_excluded
-        + citation_excluded
-        + footnote_excluded
-        + endnote_excluded
-        + table_excluded
-        + visual_excluded
-        + figure_inner_excluded
-    )
+    numeric_excluded
+    + citation_excluded
+    + equation_excluded
+    + footnote_excluded
+    + endnote_excluded
+    + table_excluded
+    + visual_excluded
+    + figure_inner_excluded
+)
     final_count = max(total_words - excluded, 0)
 
     print("\n" + "=" * 48)
     print("QCAA WORD COUNT REPORT")
     print("=" * 48)
-    print(f"Word total incl. footnotes/endnotes:   {total_words}")
+    print(f"Raw word count incl. footnotes/endnotes:   {total_words}")
     print("Excluded:")
     print(f"  Numbers/symbols:                       {numeric_excluded}")
     print(f"  Citations (fields + confirmed typed):  {citation_excluded}")
@@ -1195,6 +1207,7 @@ def main():
         "\nStill check by eye: text inside images, unusual citation styles, "
         "SmartArt labels, and any custom reference-manager field codes."
     )
+    print(f"Again, ESTIMATED QCAA WORD COUNT: {final_count}")
 
 
 if __name__ == "__main__":
