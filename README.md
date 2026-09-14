@@ -1,4 +1,4 @@
-# QCAA Word Count Tool
+# QCAA Word Count Tool - made with Claude and DeepSeek AI
 **Note that this was made with Claude and DeepSeek AI, I don't know how to state that because I'm new with using GitHub.**
 
 
