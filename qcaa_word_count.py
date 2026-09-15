@@ -1,1666 +1,2170 @@
+#!/usr/bin/env python3
+"""
+QCAA Word Count Tool (v3, Option B + Tables + Citations)
+=========================================================
+
+Run with:
+    python qcaa_word_count.py                    # opens file picker
+    python qcaa_word_count.py path/to/file.docx  # runs on a specific file
+    python qcaa_word_count.py --explain          # shows QCAA rules, exits
+
+Requires:
+    pip install python-docx
+
+WHAT THIS VERSION DOES
+  - File picker (or path from command line)
+  - Parses paragraphs, headings, and tables from a .docx
+  - Excludes title page / front matter (before the first heading)
+  - Excludes contents / abstract / references sections
+  - Asks about appendixes (they're only excluded if supplementary-only)
+  - Counts headings and body prose
+  - Excludes numbers and symbols (tokens with digits but no letters)
+  - Classifies tables and asks the user about each one
+  - Detects APA 7 in-text citations and offers a manual fallback
+  - Prints a report with a table and citation breakdown
+
+WHAT IT DOES NOT DO YET
+  - Equations and calculations outside tables
+  - Math objects (OMML) inside paragraphs or table cells
+  - Footnotes / endnotes
+  - Text boxes / SmartArt
+  - Manual [[QCAA_EXCLUDE]] markers
+  - Saved decisions between runs
+  - Colour output or GUI review screen
+  - Audit report export
+
+CODE LAYOUT (each numbered section is a distinct pipeline stage)
+  Section 1  — Data model (shapes of data)
+  Section 2  — Helpers (small pure functions)
+  Section 3  — Ingest (.docx -> Document)
+  Section 4  — Structure detection (assign regions to blocks)
+  Section 5  — Decisions (regional + span-level)
+  Section 5b — Table classification
+  Section 5c — Citation detection (APA 7)
+  Section 6  — Interactive flag resolution
+  Section 7  — Count (walk the decision map)
+  Section 8  — Report
+  Section 9  — File picker
+  Section 10 — Entry point + --explain
+
+If something breaks, the section label tells you which stage to look at.
+"""
+
 from __future__ import annotations
 
-code = r'''#!/usr/bin/env python3
-"""
-QCAA Word Count Tool v2
-=======================
-Run with:  python qcaa_word_count.py "path/to/your/file.docx"
-(or just run it - a file picker opens, or paste the path when asked)
-
-Requires:  pip install python-docx
-
-WHAT THIS TOOL DOES
-  Estimates the QCAA word count for a response, following the official
-  QCAA word-length rules:
-
-  INCLUDED
-    all words in the text of the response
-    titles, headings and subheadings
-    tables/figures/maps/diagrams containing information OTHER than
-      raw or processed data (the WHOLE table/figure counts)
-    quotations
-    footnotes and endnotes (unless purely bibliographical)
-    abbreviations, initialisms (LPG), units (kg, m), chemical
-      formulas (KOH, HCl) -- anything with letters in it
-
-  EXCLUDED
-    title pages, contents pages, abstract, blank pages
-    visual elements of written genres (by-lines, banners, captions,
-      call-outs in articles/blogs/essays/columns)
-    raw or processed data in tables/figures/diagrams
-    numbers, symbols, equations and calculations
-    bibliography / reference list
-    appendixes (supplementary material only)
-    page numbers
-    in-text citations
-
-QUALITY-OF-LIFE FEATURES (kept from v1)
-  - File-picker dialog if you just double-click the script
-  - '?' at any prompt shows the relevant rule with examples
-  - Plain-English explanations before each category of question
-  - Per-heading breakdown at the end
-  - Manual override: wrap anything in
-        [[QCAA_EXCLUDE_START]] ... [[QCAA_EXCLUDE_END]]
-    (typed as plain text) and it is excluded no matter what
-
-NEW IN V2
-  - Assessment-type profiles (generic, student-experiment, psmt,
-    literary, extended-essay). The QCAA RULES are identical for every
-    type -- profiles only tune which candidates are surfaced and the
-    suggested default answers, plus guidance text in the prompts.
-  - Saved decisions: your answers are stored in
-        <file>.qcaa-decisions.json
-    Re-run the tool and you are only asked about anything NEW.
-  - Non-interactive mode (-n) for batch processing, with a
-    "needs review" list instead of prompts.
-  - High-confidence auto-exclusions (logged, reviewable with
-    --review-auto): TOC/page-number fields, Word "Caption"-styled
-    captions next to images, math objects, structural sections.
-  - Reads text boxes, SmartArt internal text (word/diagrams/*.xml),
-    and flags chart XML the tool cannot judge.
-  - Compares against Word's own saved word count as a sanity check.
-  - Batch mode: pass several .docx files, get a CSV-style summary.
-
-STILL CHECK BY EYE
-  - Text inside images (screenshots, scanned figures)
-  - Unusual citation styles the pattern-matcher does not know
-  - Tracked changes: the tool counts inserted text and ignores
-    deleted text (Word's "final" view) -- accept/reject first if
-    your draft is heavily marked up
-  - Whether an appendix is genuinely supplementary-only
-
-'''
-
 import argparse
-import hashlib
-import json
 import os
 import re
 import sys
-import zipfile
 from collections import defaultdict
-from xml.etree import ElementTree as ET
+from dataclasses import dataclass, field
+from enum import Enum
+from typing import Optional, Literal
 
 try:
     import docx
     from docx.oxml.ns import qn
 except ImportError:
-    sys.exit("This tool needs python-docx.\nInstall it with:  pip install python-docx")
-
-W_NS = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}"
-M_NS = "{http://schemas.openxmlformats.org/officeDocument/2006/math}"
-A_NS = "{http://schemas.openxmlformats.org/drawingml/2006/main}"
-
-START_MARK = "[[QCAA_EXCLUDE_START]]"
-END_MARK = "[[QCAA_EXCLUDE_END]]"
-
-APP_TITLE = "QCAA Word Count Tool v2"
-
-# ----------------------------------------------------------------------------
-# QCAA rule text (shown by --explain and in '?' help)
-# ----------------------------------------------------------------------------
-
-QCAA_RULES = """\
-QCAA WORD-LENGTH RULES (official summary)
------------------------------------------
-INCLUDED                                    EXCLUDED
-all words in the text of the response       title pages
-title, headings and subheadings             contents pages
-tables/figures/maps/diagrams containing     abstract
-  information OTHER than raw or processed   visual elements of written genres*
-  data (the WHOLE item counts)              raw or processed data in tables,
-quotations                                    figures and diagrams
-footnotes/endnotes (unless bibliographic)   numbers, symbols, equations,
-abbreviations, initialisms (LPG), units       calculations
-  (kg, m), chemical formulas (KOH, HCl)     bibliography / reference list
-                                            appendixes (supplementary only)
-                                            page numbers
-                                            in-text citations
-                                            blank pages
-
-* by-lines, banners, captions and call-outs that are the visual elements of
-  written genres suitable for print/online publication (literary article,
-  blog, essay, column).
-
-Raw data       = results exactly as collected/measured.
-Processed data = the same data after basic manipulation (totals, means,
-                 percentages, graphs plotted straight from the numbers).
-Anything with written interpretation, commentary, qualitative labels beyond
-simple column headers, or your own categorisations makes the WHOLE item count.
-"""
-
-RAW_DATA_EXPLANATION = """
-------------------------------------------------------------------
-RAW vs PROCESSED DATA vs "OTHER INFORMATION" (QCAA rule)
-------------------------------------------------------------------
-QCAA excludes a table/figure/diagram ONLY if it contains nothing
-but raw or processed data:
-
-  Raw data       = results exactly as collected/measured, e.g.
-            a       each participant's individual score, each
-                   trial's reading, unedited survey responses.
-  Processed data = that same data after basic manipulation, e.g.
-                   totals, means, percentages, a graph plotted
-                   straight from the numbers. Still just
-                   numbers/results -- no written interpretation.
-
-If the table/figure ALSO contains "information other than raw or
-processed data" -- written analysis or commentary inside it,
-qualitative/descriptive labels beyond simple column headers,
-annotations explaining what the data means, categorisations you
-made -- then QCAA counts the WHOLE table/figure, not just the
-extra text.
-
-Quick test: if you deleted it and kept only a sentence like "see
-Table 1 for full results", would the marker lose anything beyond
-raw numbers? If yes, answer "i" (include). If it is genuinely
-just numbers/results, answer "d" (exclude data) or "c" if it is
-purely calculation working.
-------------------------------------------------------------------
-"""
-
-VISUAL_ELEMENT_EXPLANATION = """
-------------------------------------------------------------------
-VISUAL ELEMENTS OF WRITTEN GENRES (QCAA exclusion)
-------------------------------------------------------------------
-QCAA excludes visual elements that decorate or frame a written
-piece rather than carry its argument -- specifically by-lines,
-banners, captions and call-outs of the kind you'd see in a
-literary article, blog, essay or column.
-
-Examples that SHOULD be excluded:
-  - "Figure 3: Reaction rate vs. temperature"  (a label)
-  - "By Jane Smith, 12 March 2024"
-  - A pull-quote banner restating a sentence
-  - A call-out box repeating a key statistic
-  - "Source: QCAA (2023)" under a reproduced graphic
-
-Examples that should NOT be excluded:
-  - A sentence that happens to start with "Figure 3 shows..."
-  - Ordinary body prose that names a figure inline
-  - The caption of a figure in a science report, where it
-    identifies variables or conditions (judgement call -- when
-    unsure, include it)
-
-Say yes only if this line exists purely to label/announce
-something else visually, not to carry meaning of its own.
-------------------------------------------------------------------
-"""
-
-FRONTMATTER_EXPLANATION = """
-------------------------------------------------------------------
-TITLE PAGE / FRONT MATTER (QCAA exclusion)
-------------------------------------------------------------------
-QCAA excludes title pages, contents pages, abstracts and
-declarations. Everything from the top of the document up to your
-first real content heading (Rationale, Introduction, Method...)
-is front matter if it is just the title, author, teacher, date,
-word count, declaration and signature.
-
-Say yes to exclude the whole block. Say no if your response
-actually starts before the first heading.
-------------------------------------------------------------------
-"""
-
-# ----------------------------------------------------------------------------
-# Assessment-type profiles.
-# The QCAA counting RULES are the same for every assessment type. Profiles
-# only change: (a) guidance text shown in prompts, (b) the suggested default
-# answers (always overridable), and (c) which auto-detections are aggressive.
-# ----------------------------------------------------------------------------
-
-PROFILES = {
-    "generic": {
-        "description": "General QCAA response (default)",
-        "guidance": "",
-        "table_default": "smart",   # smart | d | c | i | ask
-        "caption_default": "ask",   # ask | y | n
-        "byline_default": "ask",
-        "calc_default": "ask",      # ask | y | n  (equation/calc lines)
-        "numeric_table_bias": None,
-    },
-    "student-experiment": {
-        "description": "Student experiment / science investigation (IA, EEI, student experiment report)",
-        "guidance": (
-            "Student experiment tips:\n"
-            "  - Tables of repeated measurements / raw readings = raw data (exclude, 'd').\n"
-            "  - Tables with means/percentages plotted straight from readings = processed data ('d').\n"
-            "  - Risk-assessment, method and results-discussion tables usually contain prose\n"
-            "    (hazards, explanations) = information other than data (include, 'i').\n"
-            "  - Calculated example lines ('= 4.0 / 40.0') = calculations (exclude, 'c')."
-        ),
-        "table_default": "smart",
-        "caption_default": "ask",
-        "byline_default": "n",
-        "calc_default": "y",
-        "numeric_table_bias": "d",
-    },
-    "psmt": {
-        "description": "Problem Solving and Modelling Task (PSMT) / mathematical modelling",
-        "guidance": (
-            "PSMT tips:\n"
-            "  - Verify/Interpret sections are usually full of calculation working:\n"
-            "    chains like '= 3.2 x 4.1' are excluded as calculations.\n"
-            "  - A table that is purely algebraic/numeric working = 'c'.\n"
-            "  - Tables explaining your assumptions or evaluating the model = 'i'.\n"
-            "  - The written Interpret/Evaluate/Verify discussion always counts."
-        ),
-        "table_default": "smart",
-        "caption_default": "ask",
-        "byline_default": "n",
-        "calc_default": "y",
-        "numeric_table_bias": "c",
-    },
-    "literary": {
-        "description": "Written genre for publication (feature article, blog, essay, column, speech)",
-        "guidance": (
-            "Written-genre tips:\n"
-            "  - By-lines, banners, pull-quotes, captions and call-outs are the\n"
-            "    classic QCAA visual-element exclusions -- when the tool flags\n"
-            "    them, the default answer is yes (exclude).\n"
-            "  - The body prose of the piece always counts, including quotations."
-        ),
-        "table_default": "smart",
-        "caption_default": "y",
-        "byline_default": "y",
-        "calc_default": "n",
-        "numeric_table_bias": None,
-    },
-    "extended-essay": {
-        "description": "Extended essay / research task with heavy referencing",
-        "guidance": (
-            "Research-task tips:\n"
-            "  - Footnotes/endnotes are common here: bibliographic ones are\n"
-            "    excluded, content notes count.\n"
-            "  - The bibliography/reference list and any appendix are excluded\n"
-            "    automatically once their headings are recognised."
-        ),
-        "table_default": "smart",
-        "caption_default": "ask",
-        "byline_default": "n",
-        "calc_default": "ask",
-        "numeric_table_bias": None,
-    },
-}
-
-# ----------------------------------------------------------------------------
-# Structural section triggers. Matched against the heading's trimmed,
-# lowercased text as an EXACT match or a startswith -- NOT a substring, so
-# "References to the Divine in Paradise Lost" does not trigger.
-# ----------------------------------------------------------------------------
-
-STRUCT_TRIGGERS = {
-    "table of contents": "contents",
-    "contents": "contents",
-    "list of figures": "contents",
-    "list of tables": "contents",
-    "abstract": "abstract",
-    "bibliography": "bibliography",
-    "reference list": "bibliography",
-    "references": "bibliography",
-    "list of references": "bibliography",
-    "works cited": "bibliography",
-    "appendix": "appendix",
-    "appendices": "appendix",
-    "annex": "appendix",
-    # Front-matter declarations (QCAA treats these as title-page/front matter)
-    "declaration of authenticity": "frontmatter",
-    "declaration": "frontmatter",
-    "authenticity": "frontmatter",
-    "academic integrity": "frontmatter",
-    "student declaration": "frontmatter",
-    "declaration of originality": "frontmatter",
-}
-
-FRONTMATTER_HEADING_TRIGGERS = tuple(
-    k for k, v in STRUCT_TRIGGERS.items() if v == "frontmatter"
-)
-
-# Field codes treated as citation-producing (Word, Zotero, EndNote, Mendeley).
-CITATION_FIELD_CODES = (
-    "CITATION",
-    "ZOTERO_ITEM",
-    "ZOTERO_BIBL",
-    "ADDIN EN.CITE",
-    "ADDIN ZOTERO_ITEM",
-    "MENDELEY",
-    "CSL_CITATION",
-)
-
-# ----------------------------------------------------------------------------
-# Citation / equation patterns (candidate detectors -- matches are confirmed
-# by the user or by profile defaults, never silently except field citations)
-# ----------------------------------------------------------------------------
-
-FULL_CITATION_RE = re.compile(
-    r"\([^()]{1,160}?,\s*(?:19|20)\d{2}[a-z]?"
-    r"(?:\s*,\s*pp?\.?\s*\d+(?:\s*[-\u2013]\s*\d+)?)?"
-    r"(?:\s*;\s*[^()]{1,160}?,\s*(?:19|20)\d{2}[a-z]?"
-    r"(?:\s*,\s*pp?\.?\s*\d+(?:\s*[-\u2013]\s*\d+)?)?)*\s*\)"
-)
-NARRATIVE_CITATION_RE = re.compile(
-    r"\b[A-Z][A-Za-z'’\-]+(?:\s+(?:and|&)\s+[A-Z][A-Za-z'’\-]+|\s+et\s+al\.?)?"
-    r"\s+\((?:19|20)\d{2}[a-z]?\)"
-)
-BARE_YEAR_RE = re.compile(r"\((?:19|20)\d{2}[a-z]?\)")
-VANCOUVER_RE = re.compile(r"\[\d{1,4}(?:\s*[,\-\u2013]\s*\d{1,4})*\]")
-IBID_RE = re.compile(r"\(\s*(?:ibid\.?|op\.\s*cit\.?|loc\.\s*cit\.?|l\.c\.)\s*(?:[;,]?\s*[^)]*)?\)", re.IGNORECASE)
-
-EQUATION_RE = re.compile(
-    r"""
-    (?<![A-Za-z0-9])                    # avoid matching inside words
-    [A-Za-zΔα-ωΑ-Ω][A-Za-z0-9_²³⁴⁵⁶⁷⁸⁹]{0,15}\s*
-    (?:=|≈|≠|≤|≥)\s*
-    [^,.;:!?]{1,60}?
-    (?=[,.;:!?]|$)
-    """,
-    re.VERBOSE,
-)
-CALC_CONTINUATION_RE = re.compile(
-    r"""
-    ^\s*
-    (?:[+\-×*/÷^=]\s*)?                  # may start with an operator or '='
-    \d+(?:\.\d+)?\s*
-    (?:[+\-×*/÷^]\s*(?:\d+(?:\.\d+)?|[A-Za-zπΔα-ωΑ-Ω]+))
-    (?:\s*[+\-×*/÷^=]\s*(?:\d+(?:\.\d+)?|[A-Za-zπΔα-ωΑ-Ω]+))*
-    \s*$
-    """,
-    re.VERBOSE,
-)
-CALC_LINE_RE = re.compile(r"^\s*=\s*\S")
-
-CAPTION_TEXT_RE = re.compile(
-    r"^\s*(figure|fig\.?|table|chart|graph|diagram|image|photo|map|exhibit)\s*"
-    r"[\dIVXivx]+[a-z]?\s*[:.\u2013\u2014\-]",
-    re.IGNORECASE,
-)
-BYLINE_RE = re.compile(
-    r"^\s*(by|words by|illustration by|illustrated by|photo by|images? by)\s+\S+",
-    re.IGNORECASE,
-)
-SOURCE_LINE_RE = re.compile(r"^\s*source\s*[:.\u2013\-]\s*\S+", re.IGNORECASE)
-
-# ----------------------------------------------------------------------------
-# Small helpers
-# ----------------------------------------------------------------------------
-
-USE_COLOR = sys.stdout.isatty() and os.name != "nt" or (os.name == "nt" and os.environ.get("WT_SESSION"))
+    sys.exit("This tool needs python-docx.\nInstall it with: pip install python-docx")
 
 
-def c(text, color):
-    if not USE_COLOR:
-        return text
-    codes = {"bold": "\033[1m", "dim": "\033[2m", "red": "\033[31m", "green": "\033[32m", "yellow": "\033[33m", "cyan": "\033[36m"}
-    return f"{codes.get(color, '')}{text}\033[0m"
+# ============================================================================
+# SECTION 1 — DATA MODEL
+# ============================================================================
+
+class BlockType(str, Enum):
+    PARAGRAPH   = "paragraph"
+    HEADING     = "heading"
+    LIST_ITEM   = "list_item"
+    TABLE_CELL  = "table_cell"
+    FOOTNOTE    = "footnote"
+    ENDNOTE     = "endnote"
+    CAPTION     = "caption"
+    DRAWING     = "drawing"
+    TEXT_BOX    = "text_box"
 
 
-def tokenize(text):
-    return re.findall(r"\S+", text)
+class SpanType(str, Enum):
+    WORD         = "word"
+    ABBREVIATION = "abbreviation"
+    NUMBER       = "number"
+    UNIT         = "unit"
+    SYMBOL       = "symbol"
+    EQUATION     = "equation"
+    CALCULATION  = "calculation"
+    CITATION     = "citation"
+    QUOTATION    = "quotation"
+    PUNCTUATION  = "punctuation"
+    WHITESPACE   = "whitespace"
+    UNKNOWN      = "unknown"
 
 
-def is_numeric_symbol_token(tok):
-    """Digits but no letters -> excluded (42, 3.14, 1,000, 37%).
-    Letters present (kg, KOH, LPG, 37kg) -> left alone."""
-    has_letter = any(ch.isalpha() for ch in tok)
-    has_digit = any(ch.isdigit() for ch in tok)
+class Region(str, Enum):
+    BODY            = "body"
+    TITLE           = "title"
+    TITLE_PAGE      = "title_page"
+    CONTENTS        = "contents"
+    ABSTRACT        = "abstract"
+    REFERENCES      = "references"
+    APPENDIX        = "appendix"
+    VISUAL_TEXT     = "visual_text"
+    VISUAL_NON_TEXT = "visual_non_text"
+    BLANK           = "blank"
+    UNKNOWN         = "unknown"
+
+
+class Decision(str, Enum):
+    COUNT     = "count"
+    EXCLUDE   = "exclude"
+    FLAG      = "flag"
+    UNDECIDED = "undecided"
+
+
+class TableClass(str, Enum):
+    INFORMATION  = "information"
+    CALCULATION  = "calculation"
+    RAW_DATA     = "raw_data"
+    AMBIGUOUS    = "ambiguous"
+
+
+class TableAnswer(str, Enum):
+    COUNT_ALL    = "count_all"
+    EXCLUDE_ALL  = "exclude_all"
+    HEADERS_ONLY = "headers_only"
+
+
+@dataclass(frozen=True)
+class SourceLocation:
+    block_index: int
+    char_start: int
+    char_end: int
+    run_index: Optional[int] = None
+
+    def __post_init__(self) -> None:
+        if self.char_end < self.char_start:
+            raise ValueError(
+                f"SourceLocation char_end ({self.char_end}) "
+                f"< char_start ({self.char_start})"
+            )
+
+
+@dataclass
+class DecisionRecord:
+    decision: Decision = Decision.UNDECIDED
+    rule_id: Optional[str] = None
+    confidence: Optional[float] = None
+    reason: Optional[str] = None
+    source: Literal["auto", "manual", "default"] = "auto"
+
+    auto_decision: Optional[Decision] = None
+    auto_rule_id: Optional[str] = None
+    auto_confidence: Optional[float] = None
+
+    def as_manual_override(self, new_decision: Decision, reason: str = "") -> None:
+        if self.source == "auto":
+            self.auto_decision = self.decision
+            self.auto_rule_id = self.rule_id
+            self.auto_confidence = self.confidence
+        self.decision = new_decision
+        self.rule_id = "MANUAL"
+        self.confidence = 1.0
+        self.reason = reason or "Manually overridden by user"
+        self.source = "manual"
+
+    @property
+    def is_resolved(self) -> bool:
+        return self.decision in (Decision.COUNT, Decision.EXCLUDE)
+
+    @property
+    def needs_review(self) -> bool:
+        return self.decision in (Decision.FLAG, Decision.UNDECIDED)
+
+
+@dataclass
+class Span:
+    text: str
+    source: SourceLocation
+    span_type: SpanType = SpanType.UNKNOWN
+    decision_record: DecisionRecord = field(default_factory=DecisionRecord)
+    tags: set[str] = field(default_factory=set)
+
+    @property
+    def decision(self) -> Decision:
+        return self.decision_record.decision
+
+    @property
+    def counts_as_word(self) -> bool:
+        return self.decision_record.decision == Decision.COUNT
+
+
+@dataclass
+class Block:
+    block_type: BlockType
+    spans: list[Span] = field(default_factory=list)
+    region: Region = Region.UNKNOWN
+    region_record: DecisionRecord = field(default_factory=DecisionRecord)
+    block_index: int = 0
+    style_name: Optional[str] = None
+    math_object_count: int = 0
+    raw_text: str = ""     
+    is_visual: bool = False
+    @property
+    def text(self) -> str:
+        if self.raw_text:
+            return self.raw_text
+        return "".join(s.text for s in self.spans)
+
+    @property
+    def is_regionally_excluded(self) -> bool:
+        return (
+            self.region_record.decision == Decision.EXCLUDE
+            and self.region_record.source != "manual"
+        )
+
+    def iter_word_spans(self):
+        for s in self.spans:
+            if s.counts_as_word:
+                yield s
+
+
+@dataclass
+class Table:
+    rows: list[list[Block]] = field(default_factory=list)
+    table_index: int = 0
+    block_index: int = 0
+
+    suggestion: TableClass = TableClass.AMBIGUOUS
+    suggestion_confidence: float = 0.0
+
+    answer: Optional[TableAnswer] = None
+    answer_record: DecisionRecord = field(default_factory=DecisionRecord)
+    header_row_index: int = 0
+
+    def iter_cells(self):
+        for row in self.rows:
+            for cell in row:
+                yield cell
+
+    @property
+    def word_count(self) -> int:
+        return sum(len(cell.spans) for cell in self.iter_cells())
+
+
+@dataclass
+class Citation:
+    text: str
+    occurrences: int = 0
+    source: Literal["auto", "manual"] = "auto"
+    pattern_name: Optional[str] = None
+
+    @property
+    def word_count(self) -> int:
+        return len(tokenize(self.text))
+
+
+@dataclass
+class Document:
+    blocks: list[Block] = field(default_factory=list)
+    tables: list[Table] = field(default_factory=list)
+    filename: Optional[str] = None
+    profile: str = "default"
+
+    citations: list[Citation] = field(default_factory=list)
+    footnotes: list[Footnote] = field(default_factory=list)
+
+    def all_spans(self):
+        for b in self.blocks:
+            for s in b.spans:
+                yield s
+        for t in self.tables:
+            for c in t.iter_cells():
+                for s in c.spans:
+                    yield s
+
+@dataclass
+class Footnote:
+    """A footnote or endnote extracted from the docx."""
+    footnote_id: str
+    text: str
+    kind: Literal["footnote", "endnote"] = "footnote"
+
+    suggestion: Literal["bibliographic", "commentary", "ambiguous"] = "ambiguous"
+    suggestion_confidence: float = 0.0
+
+    answer: Optional[Literal["exclude", "count"]] = None
+    answer_record: DecisionRecord = field(default_factory=DecisionRecord)
+
+    @property
+    def word_count(self) -> int:
+        return len(tokenize(self.text))
+    
+# ============================================================================
+# SECTION 2 — HELPERS
+# ============================================================================
+
+def _is_inside_math(node) -> bool:
+    """True if this XML node sits inside an m:oMath or m:oMathPara element."""
+    for ancestor in node.iterancestors():
+        if ancestor.tag in (qn("m:oMath"), qn("m:oMathPara")):
+            return True
+    return False
+
+
+def _needs_space(prev_chunk: str, next_chunk: str) -> bool:
+    """Word sometimes stores adjacent runs without a space between them.
+    Returns True if we should insert a space when stitching chunks."""
+    if not prev_chunk or not next_chunk:
+        return False
+    last = prev_chunk[-1]
+    first = next_chunk[0]
+    if last.isspace() or first.isspace():
+        return False
+    return last.isalnum() and first.isalnum()
+
+
+def _extract_text_from_element(element) -> tuple[str, int]:
+    """Walk an XML element and return (text, math_count).
+
+    Handles w:t (text), w:tab, w:br/w:cr, and skips math objects.
+    Includes text box content because w:txbxContent uses the same w:t
+    elements internally.
+    """
+    parts: list[str] = []
+    math_count = 0
+    seen_math_roots: set[int] = set()
+
+    for node in element.iter():
+        tag = node.tag
+
+        if tag in (qn("m:oMath"), qn("m:oMathPara")):
+            node_id = id(node)
+            if node_id not in seen_math_roots:
+                seen_math_roots.add(node_id)
+                math_count += 1
+            continue
+
+        if _is_inside_math(node):
+            continue
+
+        if tag == qn("w:t"):
+            text = node.text or ""
+            if parts and text and _needs_space(parts[-1], text):
+                parts.append(" ")
+            parts.append(text)
+        elif tag == qn("w:tab"):
+            parts.append("\t")
+        elif tag in (qn("w:br"), qn("w:cr")):
+            parts.append("\n")
+
+    return "".join(parts), math_count
+
+
+def paragraph_text(para) -> tuple[str, int]:
+    """Reconstruct paragraph text from the XML, preserving spaces.
+    Returns (text, math_object_count)."""
+    return _extract_text_from_element(para._element)
+
+
+def paragraph_text_boxes(para) -> list[tuple[str, int]]:
+    """Extract text box content nested inside this paragraph.
+
+    Word stores text-box content in <w:txbxContent> elements. These are
+    children of drawings/shapes anchored in a paragraph. We extract each
+    text box separately so it becomes its own block.
+    """
+    results: list[tuple[str, int]] = []
+    for node in para._element.iter():
+        if node.tag == qn("w:txbxContent"):
+            text, math_count = _extract_text_from_element(node)
+            if text.strip() or math_count:
+                results.append((text, math_count))
+    return results
+
+
+def cell_text(cell) -> tuple[str, int]:
+    """Reconstruct table cell text reliably. Returns (text, math_count)."""
+    parts: list[str] = []
+    total_math = 0
+    for para in cell.paragraphs:
+        t, m = paragraph_text(para)
+        parts.append(t)
+        total_math += m
+    return "\n".join(parts), total_math
+
+
+def tokenize(text: str) -> list[str]:
+    return [t for t in re.findall(r"\S+", text) if any(c.isalnum() for c in t)]
+
+
+def is_numeric_token(tok: str) -> bool:
+    has_letter = any(c.isalpha() for c in tok)
+    has_digit = any(c.isdigit() for c in tok)
     return has_digit and not has_letter
 
 
-def word_count(text):
-    return len([t for t in tokenize(text) if any(ch.isalnum() for ch in t)])
+def heading_level_from_style(style_name: str) -> int | None:
+    m = re.match(r"Heading (\d+)", style_name or "")
+    return int(m.group(1)) if m else None
 
 
-def numeric_symbol_count(text):
-    return sum(1 for t in tokenize(text) if is_numeric_symbol_token(t))
+def make_spans_for_text(text: str, block_index: int) -> list[Span]:
+    spans: list[Span] = []
+    cursor = 0
+    for token in re.findall(r"\S+", text):
+        start = text.find(token, cursor)
+        end = start + len(token)
+        cursor = end
+        spans.append(Span(
+            text=token,
+            source=SourceLocation(
+                block_index=block_index,
+                char_start=start,
+                char_end=end,
+            ),
+        ))
+    return spans
 
 
-def strip_markers(text):
-    return text.replace(START_MARK, "").replace(END_MARK, "")
+def describe_suggestion(table: Table) -> str:
+    s = table.suggestion
+    if s == TableClass.INFORMATION:
+        return "this looks like a table of information → count the whole table"
+    if s == TableClass.CALCULATION:
+        return "this looks like calculation working → exclude the whole table"
+    if s == TableClass.RAW_DATA:
+        return "this looks like raw or processed data → exclude the whole table"
+    return "the tool could not confidently classify this table"
 
 
-def count_occurrences(text, target):
-    return text.count(target) if target else 0
+def describe_confidence(conf: float) -> str:
+    if conf >= 0.75:
+        return "high confidence"
+    if conf >= 0.5:
+        return "medium confidence"
+    return "low confidence"
+# ============================================================================
+# SECTION 3 — INGEST
+# ============================================================================
 
+def ingest(path: str) -> Document:
+    doc = docx.Document(path)
+    document = Document(filename=os.path.basename(path))
 
-def sha1_file(path, _bufsize=1 << 20):
-    h = hashlib.sha1()
-    with open(path, "rb") as f:
-        while True:
-            b = f.read(_bufsize)
-            if not b:
-                break
-            h.update(b)
-    return h.hexdigest()
+    block_index = 0
 
+    for para in doc.paragraphs:
+        text, math_count = paragraph_text(para)
+        if text.strip() or math_count:
+            style_name = (para.style.name or "") if para.style else ""
+            level = heading_level_from_style(style_name)
+            block_type = BlockType.HEADING if level else BlockType.PARAGRAPH
 
-# ----------------------------------------------------------------------------
-# Decision store: remembers your answers between runs
-# ----------------------------------------------------------------------------
+            block = Block(
+                block_type=block_type,
+                block_index=block_index,
+                style_name=style_name,
+            )
+            block.raw_text = text
+            block.spans = make_spans_for_text(text, block_index=block_index)
+            block.math_object_count = math_count
+            document.blocks.append(block)
+            block_index += 1
 
-class Decisions:
-    """Loads/saves user answers so re-runs only ask about new candidates."""
-
-    def __init__(self, path=None):
-        self.path = path
-        self.data = {"version": 2, "file_sha1": None, "decisions": {}, "auto": []}
-        if path and os.path.isfile(path):
-            try:
-                with open(path, "r", encoding="utf-8") as f:
-                    loaded = json.load(f)
-                if loaded.get("version") == 2:
-                    self.data.update(loaded)
-            except Exception:
-                pass
-
-    def saved(self, key):
-        return self.data["decisions"].get(key)
-
-    def record_auto(self, key, answer, reason):
-        self.data["auto"].append({"key": key, "answer": answer, "reason": reason})
-
-    def resolve(self, key, prompt, choices, default, help_text=None,
-                interactive=True, review_auto=False):
-        """Returns one of `choices`. Saved answer wins; then interactive
-        prompt (with default); then the default itself."""
-        saved = self.saved(key)
-        if saved in choices:
-            default = saved
-        if not interactive:
-            if saved is None:
-                self.data["auto"].append({"key": key, "answer": default, "reason": "default (non-interactive)"})
-            return default
-        suffix = "/".join(choices)
-        while True:
-            ans = input(f"{prompt} ({suffix}) [{default}]: ").strip().lower()
-            if not ans:
-                ans = default
-            if ans in choices:
-                self.data["decisions"][key] = ans
-                return ans
-            if ans in ("?", "help", "h") and help_text:
-                print(help_text)
+        # Extract text boxes nested in this paragraph (if any)
+        for tb_text, tb_math in paragraph_text_boxes(para):
+            if not tb_text.strip() and not tb_math:
                 continue
-            print(f"Please enter {suffix} or ?.")
+            block = Block(
+                block_type=BlockType.TEXT_BOX,
+                block_index=block_index,
+            )
+            block.raw_text = tb_text
+            block.spans = make_spans_for_text(tb_text, block_index=block_index)
+            block.math_object_count = tb_math
+            document.blocks.append(block)
+            block_index += 1
+
+    for t_idx, raw_table in enumerate(doc.tables):
+        table = Table(table_index=t_idx)
+
+        for r_idx, raw_row in enumerate(raw_table.rows):
+            row_blocks: list[Block] = []
+            for c_idx, raw_cell in enumerate(raw_row.cells):
+                text, math_count = cell_text(raw_cell)
+                synthetic_index = 100_000 + t_idx * 1000 + r_idx * 100 + c_idx
+                cell_block = Block(
+                    block_type=BlockType.TABLE_CELL,
+                    block_index=synthetic_index,
+                )
+                cell_block.raw_text = text
+                cell_block.spans = make_spans_for_text(text, block_index=synthetic_index)
+                cell_block.math_object_count = math_count
+                row_blocks.append(cell_block)
+            table.rows.append(row_blocks)
+
+        document.tables.append(table)
+
+    return document
+
+# ============================================================================
+# SECTION 4 — STRUCTURE DETECTION
+# ============================================================================
+
+SECTION_TRIGGERS = {
+    "contents": "contents",
+    "table of contents": "contents",
+    "list of figures": "contents",
+    "list of tables": "contents",
+    "abstract": "abstract",
+    "bibliography": "references",
+    "reference list": "references",
+    "references": "references",
+    "list of references": "references",
+    "works cited": "references",
+    "appendix": "appendix",
+    "appendices": "appendix",
+    "annex": "appendix",
+}
 
 
-# ----------------------------------------------------------------------------
-# Document model: walk the body with lxml so text boxes, fields and math are
-# all visible to us (python-docx's paragraph.text misses text-box content).
-# ----------------------------------------------------------------------------
+def detect_regions(document: Document) -> None:
+    first_heading_idx = None
+    for block in document.blocks:
+        if block.block_type == BlockType.HEADING:
+            first_heading_idx = block.block_index
+            break
 
-class Doc:
-    def __init__(self, path):
-        self.path = path
-        self.document = docx.Document(path)
-        self.body = self.document.element.body
-        self.style_names = {s.style_id: s.name for s in self.document.styles}
-        # blocks: list of ("p"|"tbl", element)
-        self.blocks = [
-            (kind, el)
-            for el in self.body
-            for kind in ("p", "tbl")
-            if el.tag == qn(f"w:{kind}")
-        ]
-        self.fields = self._analyse_fields()
-        self.app_props = self._read_app_props()
-        self.diagram_texts = self._read_diagram_texts()
-        self.chart_parts = self._list_chart_parts()
+    current_region = Region.BODY
+    current_level: int | None = None
 
-    # -- text extraction ------------------------------------------------------
+    for block in document.blocks:
+        if first_heading_idx is not None and block.block_index < first_heading_idx:
+            block.region = Region.TITLE_PAGE
+            continue
 
-    @staticmethod
-    def visible_text(el):
-        """All w:t descendants -- includes text-box text and field results,
-        excludes field instructions and tracked deletions."""
-        return "".join(t.text or "" for t in el.iter(qn("w:t")))
+        if block.block_type == BlockType.HEADING:
+            text = block.text.strip().lower().rstrip(":.-")
+            level = heading_level_from_style(block.style_name) or 1
 
-    @staticmethod
-    def has_math(el):
-        return el.find(f".//{qn('m:oMath')}") is not None or \
-               el.find(f".//{qn('m:oMathPara')}") is not None
+            if text in SECTION_TRIGGERS:
+                current_region = Region(SECTION_TRIGGERS[text])
+                current_level = level
+            elif current_region not in (Region.BODY, Region.TITLE_PAGE):
+                if current_level is not None and level <= current_level:
+                    current_region = Region.BODY
+                    current_level = None
 
-    @staticmethod
-    def has_drawing(el):
-        for tag in ("w:drawing", "w:pict", "w:object"):
-            if el.find(f".//{qn(tag)}") is not None:
-                return True
-        return False
-
-    def style_name(self, el):
-        ps = el.find(f"{qn('w:pPr')}/{qn('w:pStyle')}")
-        if ps is None:
-            return ""
-        return self.style_names.get(ps.get(qn("w:val")), "")
-
-    def heading_level(self, el):
-        m = re.match(r"Heading (\d+)", self.style_name(el) or "")
-        return int(m.group(1)) if m else None
-
-    def is_caption_styled(self, el):
-        name = (self.style_name(el) or "").lower()
-        return name.startswith("caption")
-
-    def para_bold_ratio(self, el):
-        runs = [r for r in el.iter(qn("w:r"))
-                if (r.text or "").strip() or any(t.text for t in r.iter(qn("w:t")))]
-        if not runs:
-            return 0.0
-        bold = 0
-        for r in runs:
-            rpr = r.find(qn("w:rPr"))
-            if rpr is not None and (rpr.find(qn("w:b")) is not None or rpr.find(qn("w:bCs")) is not None):
-                bold += 1
-        return bold / len(runs)
-
-    # -- field analysis -------------------------------------------------------
-
-    def _analyse_fields(self):
-        """Walk the body once, tracking complex and simple fields.
-        Returns dict with citation_texts, toc_paras, page_paras, other_fields."""
-        citation_texts, other_fields = [], []
-        toc_paras, page_paras = set(), set()
-        stack = []
-        current_p = None
-        for el in self.body.iter():
-            tag = el.tag
-            if tag == qn("w:p"):
-                current_p = el
-            elif tag == qn("w:fldChar"):
-                fct = el.get(qn("w:fldCharType"))
-                if fct == "begin":
-                    stack.append({"instr": "", "collecting": False, "buf": "",
-                                  "paras": set([current_p]) if current_p is not None else set()})
-                elif fct == "separate" and stack:
-                    stack[-1]["collecting"] = True
-                elif fct == "end" and stack:
-                    cur = stack.pop()
-                    self._classify_field(cur["instr"], cur["buf"], cur["paras"],
-                                         citation_texts, toc_paras, page_paras, other_fields)
-            elif tag == qn("w:instrText"):
-                if stack and not stack[-1]["collecting"]:
-                    stack[-1]["instr"] += el.text or ""
-            elif tag == qn("w:t"):
-                if stack:
-                    if stack[-1]["collecting"]:
-                        stack[-1]["buf"] += el.text or ""
-                    if current_p is not None:
-                        stack[-1]["paras"].add(current_p)
-            elif tag == qn("w:fldSimple"):
-                instr = el.get(qn("w:instr"), "") or ""
-                buf = "".join(t.text or "" for t in el.iter(qn("w:t")))
-                paras = {current_p} if current_p is not None else set()
-                self._classify_field(instr, buf, paras,
-                                     citation_texts, toc_paras, page_paras, other_fields)
-        return {"citation_texts": citation_texts, "toc_paras": toc_paras,
-                "page_paras": page_paras, "other_fields": other_fields}
-
-    @staticmethod
-    def _classify_field(instr, buf, paras, citation_texts, toc_paras, page_paras, other_fields):
-        up = (instr or "").upper().strip()
-        if up.startswith("TOC") or up.startswith("TOA"):
-            toc_paras.update(paras)
-        elif up.startswith("PAGEREF"):
-            toc_paras.update(paras)   # TOC entries & "see page X" cross-refs
-        elif up.startswith("PAGE") or up.startswith("NUMPAGES"):
-            page_paras.update(paras)
-        elif any(code in up for code in CITATION_FIELD_CODES):
-            if buf.strip():
-                citation_texts.append(buf)
-        elif up.startswith(("REF ", "STYLEREF", "SEQ", "HYPERLINK")):
-            pass  # keep visible text; not an exclusion category
+            block.region = current_region
         else:
-            if buf.strip():
-                other_fields.append((up[:40], buf[:60]))
-
-    # -- package parts --------------------------------------------------------
-
-    def _read_app_props(self):
-        try:
-            with zipfile.ZipFile(self.path) as z:
-                if "docProps/app.xml" not in z.namelist():
-                    return {}
-                root = ET.fromstring(z.read("docProps/app.xml"))
-            props = {}
-            for child in root:
-                tag = child.tag.split("}")[-1]
-                if tag in ("Pages", "Words", "Characters", "Paragraphs", "Lines") and child.text:
-                    try:
-                        props[tag] = int(child.text)
-                    except ValueError:
-                        pass
-            return props
-        except Exception:
-            return {}
-
-    def _read_diagram_texts(self):
-        """SmartArt text lives in word/diagrams/data*.xml -- readable after all."""
-        out = {}
-        try:
-            with zipfile.ZipFile(self.path) as z:
-                for name in z.namelist():
-                    if name.startswith("word/diagrams/") and name.endswith(".xml"):
-                        try:
-                            root = ET.fromstring(z.read(name))
-                        except ET.ParseError:
-                            continue
-                        ts = [(t.text or "").strip() for t in root.iter(f"{A_NS}t")]
-                        ts = [t for t in ts if t]
-                        if ts:
-                            out[name] = " ".join(ts)
-        except Exception:
-            pass
-        return out
-
-    def _list_chart_parts(self):
-        try:
-            with zipfile.ZipFile(self.path) as z:
-                return [n for n in z.namelist()
-                        if n.startswith("word/charts/") and n.endswith(".xml")]
-        except Exception:
-            return []
+            block.region = current_region
 
 
-# ----------------------------------------------------------------------------
-# Candidate finders. Each returns candidates keyed by a stable decision key,
-# carrying the block index where found (so exclusions apply only there --
-# never to identical text elsewhere in the body).
-# ----------------------------------------------------------------------------
+# ============================================================================
+# SECTION 5 — DECISIONS (paragraphs)
+# ============================================================================
 
-class ExclusionTracker:
-    """Tracks structural exclusions (contents/abstract/bibliography/appendix)
-    and manual [[QCAA_EXCLUDE]] marker regions across the block walk."""
-
-    def __init__(self):
-        self.in_struct = False
-        self.struct_kind = None
-        self.struct_level = None
-        self.in_manual = False
-
-    def visit_heading(self, lvl, text):
-        if self.in_struct and lvl <= self.struct_level:
-            self.in_struct = False
-            self.struct_kind = None
-            self.struct_level = None
-            
-            
-        if not self.in_struct:
-            lower = text.strip().lower().rstrip(":.-")
-
-            for trigger, kind in STRUCT_TRIGGERS.items():
-                # Only treat an exact heading as a structural section.
-                # This prevents legitimate headings such as
-                # "References to the Divine in Paradise Lost"
-                # from being mistaken for a reference list.
-                if lower == trigger:
-                    self.in_struct = True
-                    self.struct_kind = kind
-                    self.struct_level = lvl
-                    return
-
-    def visit_markers(self, has_start, has_end):
-        block_manual = self.in_manual or has_start or has_end
-        if has_start and not has_end:
-            self.in_manual = True
-        elif has_end:
-            self.in_manual = False
-        return block_manual
-
-    @property
-    def excluded(self):
-        return self.in_struct or self.in_manual
+def apply_regional_decisions(document: Document) -> None:
+    """Set the region_record on every paragraph block, based on its region."""
+    for block in document.blocks:
+        if block.region in (Region.TITLE_PAGE, Region.CONTENTS,
+                            Region.ABSTRACT, Region.REFERENCES):
+            block.region_record = DecisionRecord(
+                decision=Decision.EXCLUDE,
+                rule_id=f"R-{block.region.value.upper()}",
+                confidence=0.9,
+                reason=f"Region '{block.region.value}' is excluded by QCAA rules",
+                source="auto",
+            )
+        elif block.region == Region.APPENDIX:
+            block.region_record = DecisionRecord(
+                decision=Decision.FLAG,
+                rule_id="R-APPENDIX",
+                confidence=0.6,
+                reason="Appendixes excluded only if supplementary-only",
+                source="auto",
+            )
+        else:
+            block.region_record = DecisionRecord(
+                decision=Decision.COUNT,
+                rule_id="R-BODY",
+                confidence=1.0,
+                reason="Body content counts",
+                source="auto",
+            )
 
 
-def find_heading_candidates(doc, confirmed_headings):
-    """Short, bold-majority or mostly-caps paragraphs that might be unstyled
-    section headings. More forgiving than v1: a heading with one non-bold
-    run (e.g. the number in '1. Introduction') still qualifies."""
-    seen, ordered = set(), []
-    for i, (kind, el) in enumerate(doc.blocks):
-        if kind != "p" or doc.heading_level(el) is not None:
-            continue
-        text = strip_markers(doc.visible_text(el)).strip()
-        if not text or len(text) > 90 or text in seen:
-            continue
-        if text.endswith((".", "?", "!")) and len(text) > 40:
-            continue  # almost certainly a sentence
-        bold_ratio = doc.para_bold_ratio(el)
-        letters = [ch for ch in text if ch.isalpha()]
-        is_capsy = len(letters) >= 3 and sum(ch.isupper() for ch in letters) / len(letters) > 0.7
-        looks_numbered = bool(re.match(r"^\d+(\.\d+)*[.)]?\s+\S", text)) and bold_ratio >= 0.5
-        if bold_ratio >= 0.8 or is_capsy or looks_numbered:
-            seen.add(text)
-            ordered.append((i, text))
-    return ordered
+# ============================================================================
+# Math / equation character sets
+# ============================================================================
+
+# Strong indicators that a token is an equation or mathematical expression
+EQUATION_CHARS = set("=×÷^*≤≥≈√∫Σ∑∴∵±∓∂∇∝∞")
+SUPERSCRIPT_DIGITS = set("⁰¹²³⁴⁵⁶⁷⁸⁹")
+SUBSCRIPT_DIGITS = set("₀₁₂₃₄₅₆₇₈₉")
+GREEK_LETTERS = set("αβγδεζηθικλμνξοπρστυφχψωΑΒΓΔΕΖΗΘΙΚΛΜΝΞΟΠΡΣΤΥΦΧΨΩ")
+MATH_SYMBOLS = EQUATION_CHARS | {"→", "←", "⇒", "⇔", "∈", "∉", "∪", "∩", "°", "′", "″"}
 
 
-def find_citation_candidates(doc, confirmed_headings):
-    """Typed-out in-text citations (field citations are handled separately).
-    Returns {key: (match, context)}."""
-    candidates = {}
-    tracker = ExclusionTracker()
-    for i, (kind, el) in enumerate(doc.blocks):
-        raw = doc.visible_text(el)
-        text = strip_markers(raw).replace("\n", " ")
-        has_start, has_end = START_MARK in raw, END_MARK in raw
-        if kind == "p":
-            lvl = effective_heading_level(doc, el, confirmed_headings)
-            if lvl is not None:
-                tracker.visit_heading(lvl, text)
-        if tracker.visit_markers(has_start, has_end) or tracker.in_struct:
-            continue
-        if el in doc.fields["toc_paras"] or el in doc.fields["page_paras"]:
-            continue
-        for pattern in (FULL_CITATION_RE, NARRATIVE_CITATION_RE, VANCOUVER_RE, IBID_RE, BARE_YEAR_RE):
-            for m in pattern.finditer(text):
-                full = m.group(0)
-                key = "cite:" + full
-                if key not in candidates:
-                    start = max(m.start() - 40, 0)
-                    end = min(m.end() + 20, len(text))
-                    candidates[key] = (full, text[start:end], i)
-    return candidates
+def is_symbol_token(tok: str) -> bool:
+    """A token with no letters and no digits — e.g. '+', '=', '→', '%'."""
+    return not any(c.isalnum() for c in tok)
 
 
-def find_equation_candidates(doc, confirmed_headings):
-    """Inline equations and calculation lines. Math objects (OMML) are
-    reported separately -- their text is never in w:t so they are already
-    excluded automatically."""
-    candidates = {}
-    math_paras = []
-    tracker = ExclusionTracker()
-    for i, (kind, el) in enumerate(doc.blocks):
-        if kind != "p":
-            continue
-        raw = doc.visible_text(el)
-        text = strip_markers(raw)
-        has_start, has_end = START_MARK in raw, END_MARK in raw
-        lvl = effective_heading_level(doc, el, confirmed_headings)
-        if lvl is not None:
-            tracker.visit_heading(lvl, text)
-        if tracker.visit_markers(has_start, has_end) or tracker.in_struct:
-            continue
-        if el in doc.fields["toc_paras"] or el in doc.fields["page_paras"]:
-            continue
-        if doc.has_math(el):
-            math_paras.append(i)
-        for m in EQUATION_RE.finditer(text):
-            full = m.group(0).strip()
-            if full and len(full) <= 70:
-                key = "eq:" + full
-                if key not in candidates:
-                    start = max(m.start() - 30, 0)
-                    end = min(m.end() + 10, len(text))
-                    candidates[key] = (full, text[start:end], i)
-        stripped = text.strip()
-        if (CALC_CONTINUATION_RE.match(stripped) or CALC_LINE_RE.match(stripped)) and stripped:
-            key = "eq:" + stripped
-            if key not in candidates:
-                candidates[key] = (stripped, stripped, i)
-    return candidates, math_paras
+def is_equation_token(tok: str) -> bool:
+    """A token that looks like inline equation working.
 
+    Catches:
+      - Tokens with strong operators (=, ×, ÷, ^, etc.)
+      - Tokens with superscripts or subscripts
+      - Tokens with Greek letters
+      - Algebraic patterns like "0.81a", "2a", "1.8b"
+      - Weaker cases: digits mixed with +, -, /, if the letters don't
+        spell a real word
+    """
+    if any(op in tok for op in MATH_SYMBOLS):
+        return True
+    if any(c in SUPERSCRIPT_DIGITS for c in tok):
+        return True
+    if any(c in SUBSCRIPT_DIGITS for c in tok):
+        return True
+    if any(c in GREEK_LETTERS for c in tok):
+        return True
 
-def find_visual_candidates(doc, confirmed_headings):
-    """Captions (styled or text-shaped), by-lines and Source: lines.
-    Only paragraphs adjacent to a drawing/table, or styled as captions, so
-    ordinary prose starting with 'Figure 3 shows...' is not flagged."""
-    candidates = {}
-    tracker = ExclusionTracker()
-    n = len(doc.blocks)
-    for i, (kind, el) in enumerate(doc.blocks):
-        if kind != "p":
-            continue
-        raw = doc.visible_text(el)
-        text = strip_markers(raw).strip()
-        has_start, has_end = START_MARK in raw, END_MARK in raw
-        lvl = effective_heading_level(doc, el, confirmed_headings)
-        if lvl is not None:
-            tracker.visit_heading(lvl, text)
-        if tracker.visit_markers(has_start, has_end) or tracker.in_struct:
-            continue
-        if el in doc.fields["toc_paras"] or el in doc.fields["page_paras"]:
-            continue
-        if not text:
-            continue
-        # adjacency: drawing paragraph before/after, or table before/after
-        adj_drawing = False
-        for j in (i - 1, i + 1):
-            if 0 <= j < n:
-                jkind, jel = doc.blocks[j]
-                if jkind == "p" and doc.has_drawing(jel):
-                    adj_drawing = True
-                if jkind == "tbl":
-                    adj_drawing = True
-        short = len(text) <= 160
-        is_caption_style = doc.is_caption_styled(el)
-        looks_caption = bool(CAPTION_TEXT_RE.match(text))
-        looks_byline = bool(BYLINE_RE.match(text))
-        looks_source = bool(SOURCE_LINE_RE.match(text)) and short
-        if short:
-            if (is_caption_style and (looks_caption or adj_drawing)) or \
-               (looks_caption and (adj_drawing or is_caption_style)):
-                candidates.setdefault("vis:" + text, (text, "caption", i, text))
-            elif looks_caption and adj_drawing:
-                candidates.setdefault("vis:" + text, (text, "caption", i, text))
-            elif looks_byline:
-                match = BYLINE_RE.match(text)
-                candidates.setdefault("vis:" + match.group(0), (match.group(0), "by-line", i, text))
-            elif looks_source and adj_drawing:
-                candidates.setdefault("vis:" + text, (text, "source line", i, text))
-    return candidates
+    # Algebraic pattern: digits followed by a single lowercase letter
+    # e.g. "2a", "0.81a", "1.8b"
+    if re.fullmatch(r"-?\d+(?:\.\d+)?[a-z]", tok):
+        return True
 
-
-def find_figure_candidates(doc, confirmed_headings):
-    """Paragraphs containing drawings/picts/objects. Text directly inside the
-    paragraph (e.g. a text box) is captured; SmartArt text is read from the
-    diagrams part and attached to the same candidate where possible."""
-    candidates = []
-    tracker = ExclusionTracker()
-    for i, (kind, el) in enumerate(doc.blocks):
-        if kind != "p":
-            continue
-        raw = doc.visible_text(el)
-        text = strip_markers(raw)
-        has_start, has_end = START_MARK in raw, END_MARK in raw
-        lvl = effective_heading_level(doc, el, confirmed_headings)
-        if lvl is not None:
-            tracker.visit_heading(lvl, text)
-        if tracker.visit_markers(has_start, has_end) or tracker.in_struct:
-            continue
-        if el in doc.fields["toc_paras"] or el in doc.fields["page_paras"]:
-            continue
-        if doc.has_drawing(el):
-            inner = text.strip()
-            candidates.append({"idx": len(candidates) + 1, "block": i, "inner": inner})
-    # SmartArt cannot safely be matched to drawing candidates by
-    # list position. Keep it as a separate review candidate.
-    for part, txt in doc.diagram_texts.items():
-        candidates.append({
-            "idx": len(candidates) + 1,
-            "block": None,
-            "inner": "",
-            "smartart": (part, txt),
-        })
-    return candidates
-        
-
-
-def effective_heading_level(doc, el, confirmed_headings):
-    lvl = doc.heading_level(el)
-    if lvl is not None:
-        return lvl
-    text = strip_markers(doc.visible_text(el)).strip()
-    if text in confirmed_headings:
-        return 1
-    return None
-
-
-# ----------------------------------------------------------------------------
-# Heading tree for the per-section breakdown
-# ----------------------------------------------------------------------------
-
-class Node:
-    __slots__ = ("level", "title", "own_words", "children", "excluded")
-
-    def __init__(self, level, title, excluded=False):
-        self.level = level
-        self.title = title
-        self.own_words = 0
-        self.children = []
-        self.excluded = excluded
-
-
-def subtotal(node):
-    return node.own_words + sum(subtotal(ch) for ch in node.children)
-
-
-def print_tree(node, indent=0, out=print):
-    for child in node.children:
-        total = subtotal(child)
-        tag = "  [excluded from count]" if child.excluded else ""
-        label = child.title.strip() or "(untitled heading)"
-        out(f"{'    ' * indent}- {label}: {total} word{'s' if total != 1 else ''}{tag}")
-        print_tree(child, indent + 1, out)
-
-
-# ----------------------------------------------------------------------------
-# Front matter detection
-# ----------------------------------------------------------------------------
-
-def is_frontmatter_heading_text(text):
-    lower = text.strip().lower().rstrip(":.-")
-
-    for trigger in FRONTMATTER_HEADING_TRIGGERS:
-        if lower == trigger:
+    # Weak operators: +, -, /, digits — exclude if the letters
+    # don't form a recognisable word
+    if any(op in tok for op in "+-/"):
+        if any(c.isdigit() for c in tok):
+            letters = "".join(c for c in tok if c.isalpha())
+            if len(letters) >= 3:
+                return False
             return True
 
     return False
 
+def _is_single_letter_variable(tok: str) -> bool:
+    """A single lowercase letter (a, b, c, h, k, x, y, n, ...) that is
+    likely a variable, not a word."""
+    return len(tok) == 1 and tok.isalpha() and tok.islower()
 
-def find_front_matter(doc, confirmed_headings):
-    """Everything before the first real content heading (a heading that is
-    not itself a front-matter trigger like 'Declaration'). Returns
-    (block_indices, lines, words) or None."""
-    first_content = None
-    for i, (kind, el) in enumerate(doc.blocks):
-        if kind != "p":
+
+def _contains_bracket(tok: str) -> bool:
+    """A token that contains any bracket-like character."""
+    return any(c in "()[]{}" for c in tok)
+
+
+def _is_equation_heavy_block(block: Block, threshold: float = 0.4) -> bool:
+    """True if a large enough fraction of this block's tokens look
+    equation-like. Used to decide whether single letters and
+    bracketed tokens are equation fragments rather than words.
+
+    Threshold 0.4 means 40%+ of tokens must be equation/number/symbol
+    before the equation-heavy rules kick in.
+    """
+    if not block.spans:
+        return False
+
+    mathy = 0
+    for span in block.spans:
+        tok = span.text
+        if (is_equation_token(tok)
+                or is_symbol_token(tok)
+                or is_numeric_token(tok)):
+            mathy += 1
+
+    return (mathy / len(block.spans)) >= threshold
+
+
+def classify_and_decide_spans(document: Document) -> None:
+    """Assign a span_type and decision to every span in every paragraph block.
+
+    Rule of thumb: if it's a word, it counts. QCAA then carves out
+    exceptions for numbers, symbols, equations, calculations, and
+    single-letter variables inside equation-heavy text.
+    """
+    for block in document.blocks:
+        if block.region_record.decision == Decision.EXCLUDE:
+            for span in block.spans:
+                span.decision_record = DecisionRecord(
+                    decision=Decision.EXCLUDE,
+                    rule_id="R-REGION",
+                    confidence=1.0,
+                    reason=f"Inherits exclusion from region '{block.region.value}'",
+                    source="auto",
+                )
             continue
-        lvl = effective_heading_level(doc, el, confirmed_headings)
-        if lvl is None:
+
+        # Compute equation density once per block.
+        equation_heavy = _is_equation_heavy_block(block)
+
+        for span in block.spans:
+            tok = span.text
+
+            # Rule 1: strong equation indicators
+            if is_equation_token(tok):
+                span.span_type = SpanType.EQUATION
+                span.decision_record = DecisionRecord(
+                    decision=Decision.EXCLUDE,
+                    rule_id="I-EQUATION",
+                    confidence=0.9,
+                    reason="Equations and calculations are excluded by QCAA rules",
+                    source="auto",
+                )
+
+            # Rule 2: symbols
+            elif is_symbol_token(tok):
+                span.span_type = SpanType.SYMBOL
+                span.decision_record = DecisionRecord(
+                    decision=Decision.EXCLUDE,
+                    rule_id="I-SYMBOL",
+                    confidence=0.95,
+                    reason="Symbols are excluded by QCAA rules",
+                    source="auto",
+                )
+
+            # Rule 3: numbers
+            elif is_numeric_token(tok):
+                span.span_type = SpanType.NUMBER
+                span.decision_record = DecisionRecord(
+                    decision=Decision.EXCLUDE,
+                    rule_id="I-NUMBER",
+                    confidence=0.95,
+                    reason="Numbers are excluded by QCAA rules",
+                    source="auto",
+                )
+
+            # Rule 4: single lowercase letter in equation-heavy block → variable
+            elif equation_heavy and _is_single_letter_variable(tok):
+                span.span_type = SpanType.EQUATION
+                span.decision_record = DecisionRecord(
+                    decision=Decision.EXCLUDE,
+                    rule_id="I-VARIABLE",
+                    confidence=0.75,
+                    reason="Single-letter variable inside equation-heavy text",
+                    source="auto",
+                )
+
+            # Rule 5: bracketed token in equation-heavy block → equation fragment
+            elif equation_heavy and _contains_bracket(tok):
+                span.span_type = SpanType.EQUATION
+                span.decision_record = DecisionRecord(
+                    decision=Decision.EXCLUDE,
+                    rule_id="I-EQUATION-FRAGMENT",
+                    confidence=0.75,
+                    reason="Bracketed token inside equation-heavy text",
+                    source="auto",
+                )
+
+            # Rule 6: otherwise it's a word
+            else:
+                span.span_type = SpanType.WORD
+                span.decision_record = DecisionRecord(
+                    decision=Decision.COUNT,
+                    rule_id="I-WORD",
+                    confidence=1.0,
+                    reason="Ordinary word",
+                    source="auto",
+                )
+# ============================================================================
+# SECTION 5b — TABLE CLASSIFICATION
+# ============================================================================
+
+CALC_OPERATOR_CHARS = set("+-*/=×÷^<>≤≥≈√")
+PROSE_RUN_RE = re.compile(r"\b[a-z]{2,}(?:\s+[a-z]{2,}){2,}\b")
+CAPTION_PATTERN = re.compile(
+    r"^\s*(figure|fig\.?|table|tbl\.?|chart|graph|diagram|image|photo|map|exhibit|plate)"
+    r"\s*[\dIVXivx]+[a-z]?\s*[:.,\u2013\u2014\-]\s*\S",
+    re.IGNORECASE,
+)
+SOURCE_PATTERN = re.compile(
+    r"^\s*source\s*[:.\u2013\u2014\-]\s*\S",
+    re.IGNORECASE,
+)
+BYLINE_PATTERN = re.compile(
+    r"^\s*(by|words by|written by|illustration by|illustrated by|photo by|images? by)\s+\S",
+    re.IGNORECASE,
+)
+
+def classify_table(table: Table) -> tuple[TableClass, float]:
+    total_cells = 0
+    prose_cells = 0
+    operator_cells = 0
+    total_tokens = 0
+    numeric_tokens = 0
+    total_equation_chars = 0
+
+    for cell in table.iter_cells():
+        text = cell.text
+        if not text.strip():
             continue
-        text = strip_markers(doc.visible_text(el)).strip()
-        if is_frontmatter_heading_text(text):
-            continue
-        first_content = i
-        break
-    indices, lines = [], []
-    scan_end = first_content if first_content is not None else len(doc.blocks)
-    for i, (kind, el) in enumerate(doc.blocks):
-        if i >= scan_end:
-            break
-        t = strip_markers(doc.visible_text(el)).strip()
-        if t:
-            lines.append(t)
-            indices.append(i)
-    words = sum(word_count(t) for t in lines)
-    has_declaration = any(is_frontmatter_heading_text(t) for t in lines)
-    if not lines:
-        return None
-    if first_content is None and not has_declaration:
-        return None  # no content heading and no declaration: too risky to offer
-    if has_declaration or (words <= 300 and len(lines) <= 15):
-        return indices, lines, words
-    return None
+        total_cells += 1
+
+        if PROSE_RUN_RE.search(text.lower()):
+            prose_cells += 1
+
+        cell_has_operator = False
+        for ch in text:
+            if ch in CALC_OPERATOR_CHARS:
+                total_equation_chars += 1
+                cell_has_operator = True
+        if cell_has_operator:
+            operator_cells += 1
+
+        for tok in tokenize(text):
+            total_tokens += 1
+            if is_numeric_token(tok):
+                numeric_tokens += 1
+
+    if total_cells == 0 or total_tokens == 0:
+        return TableClass.AMBIGUOUS, 0.0
+
+    prose_ratio = prose_cells / total_cells
+    operator_ratio = operator_cells / total_cells
+    numeric_ratio = numeric_tokens / total_tokens
+
+    # Strong equation-character presence boosts calculation score.
+    # Even if cells contain some prose ("Therefore mean = 159s"),
+    # the "=" presence is a strong signal.
+    equation_char_boost = min(total_equation_chars / 10.0, 0.5)
+
+    scores = {
+        TableClass.INFORMATION: prose_ratio,
+        TableClass.CALCULATION: min(operator_ratio + equation_char_boost, 1.0),
+        TableClass.RAW_DATA: numeric_ratio,
+    }
+    best_class = max(scores, key=lambda k: scores[k])
+    best_score = scores[best_class]
+
+    runner_up = sorted(scores.values(), reverse=True)[1]
+    margin = best_score - runner_up
+
+    confidence = max(0.0, min(1.0, (best_score * 0.6) + (margin * 0.4)))
+
+    if best_score < 0.4:
+        return TableClass.AMBIGUOUS, confidence
+
+    return best_class, confidence
+
+def suggest_table_answer(table: Table) -> TableAnswer:
+    if table.suggestion == TableClass.INFORMATION:
+        return TableAnswer.COUNT_ALL
+    return TableAnswer.EXCLUDE_ALL
 
 
-# ----------------------------------------------------------------------------
-# Notes (footnotes / endnotes)
-# ----------------------------------------------------------------------------
+def table_has_strong_default(table: Table) -> bool:
+    return (table.suggestion != TableClass.AMBIGUOUS
+            and table.suggestion_confidence >= 0.5)
 
-def get_note_texts(path):
-    footnotes, endnotes = [], []
-    with zipfile.ZipFile(path) as z:
-        names = z.namelist()
-        for fname, tag, bucket in (
-            ("word/footnotes.xml", "footnote", footnotes),
-            ("word/endnotes.xml", "endnote", endnotes),
-        ):
-            if fname not in names:
+def looks_like_caption(block: Block) -> tuple[bool, str]:
+    """Return (is_caption, kind). kind is 'caption', 'source', 'by-line', or ''."""
+    text = block.text.strip()
+
+    # Word style "Caption" is definitive
+    if block.style_name and block.style_name.lower().startswith("caption"):
+        return True, "caption"
+
+    if CAPTION_PATTERN.match(text):
+        return True, "caption"
+    if SOURCE_PATTERN.match(text):
+        return True, "source"
+    if BYLINE_PATTERN.match(text):
+        return True, "by-line"
+
+    return False, ""
+# ============================================================================
+# SECTION 5c — CITATION DETECTION (APA 7)
+# ============================================================================
+
+APA_PATTERNS: list[tuple[str, re.Pattern]] = [
+
+    ("with page numbers", re.compile(
+        r"\(\s*[A-Z][A-Za-z'’\-]+(?:\s+(?:&|and)\s+[A-Z][A-Za-z'’\-]+)?"
+        r"(?:\s+et\s+al\.?)?\s*,\s*(?:19|20)\d{2}[a-z]?"
+        r"\s*,\s*pp?\.?\s*\d+(?:\s*[-\u2013]\s*\d+)?\s*\)"
+    )),
+
+    ("multi-author", re.compile(
+        r"\(\s*[A-Z][A-Za-z'’\-]+"
+        r"(?:\s*(?:,|&|and)\s*[A-Z][A-Za-z'’\-]+)+"
+        r"(?:\s*,?\s*&?\s*[A-Z][A-Za-z'’\-]+)?"
+        r"\s*,\s*(?:19|20)\d{2}[a-z]?"
+        r"(?:\s*,\s*pp?\.?\s*\d+(?:\s*[-\u2013]\s*\d+)?)?\s*\)"
+    )),
+
+    ("et-al", re.compile(
+        r"\(\s*[A-Z][A-Za-z'’\-]+\s+et\s+al\.?\s*,\s*(?:19|20)\d{2}[a-z]?"
+        r"(?:\s*,\s*pp?\.?\s*\d+(?:\s*[-\u2013]\s*\d+)?)?\s*\)"
+    )),
+
+    ("simple", re.compile(
+        r"\(\s*[A-Z][A-Za-z'’\-]+\s*,\s*(?:19|20)\d{2}[a-z]?"
+        r"(?:\s*,\s*pp?\.?\s*\d+(?:\s*[-\u2013]\s*\d+)?)?\s*\)"
+    )),
+
+    ("corporate", re.compile(
+        r"\(\s*[A-Z][A-Za-z'’\-]+(?:\s+[A-Z][A-Za-z'’\-]+){1,6}"
+        r"\s*,\s*(?:19|20)\d{2}[a-z]?\s*\)"
+    )),
+
+    ("narrative", re.compile(
+        r"\b[A-Z][A-Za-z'’\-]+"
+        r"(?:\s+(?:and|&)\s+[A-Z][A-Za-z'’\-]+|\s+et\s+al\.?)?"
+        r"\s+\((?:19|20)\d{2}[a-z]?\)"
+    )),
+]
+
+
+def find_apa_citations(text: str) -> list[tuple[str, str]]:
+    found: list[tuple[str, str]] = []
+    claimed: list[tuple[int, int]] = []
+
+    for name, pattern in APA_PATTERNS:
+        for m in pattern.finditer(text):
+            start, end = m.span()
+            if any(s < end and start < e for s, e in claimed):
                 continue
-            try:
-                root = ET.fromstring(z.read(fname))
-            except ET.ParseError:
+            claimed.append((start, end))
+            found.append((m.group(0), name))
+
+    return found
+
+
+def collect_citations(document: Document) -> list[Citation]:
+    by_text: dict[str, Citation] = {}
+
+    for block in document.blocks:
+        if block.region_record.decision == Decision.EXCLUDE:
+            continue
+        if block.region in (Region.TITLE_PAGE, Region.CONTENTS,
+                            Region.ABSTRACT, Region.REFERENCES):
+            continue
+
+        text = block.text
+        for matched, pattern_name in find_apa_citations(text):
+            if matched in by_text:
+                by_text[matched].occurrences += 1
+            else:
+                by_text[matched] = Citation(
+                    text=matched,
+                    occurrences=1,
+                    source="auto",
+                    pattern_name=pattern_name,
+                )
+
+    return sorted(by_text.values(), key=lambda c: c.text.lower())
+
+
+def apply_citation_exclusions(document: Document) -> None:
+    """Mark every span inside a detected citation as EXCLUDE.
+
+    Tags each span with the source of the citation that claimed it
+    ('citation:auto' or 'citation:manual') so the report can attribute
+    exclusions correctly.
+    """
+    # Build a list of (citation_string, source) to search for
+    citation_items = [(c.text, c.source) for c in document.citations if c.text]
+
+    if not citation_items:
+        return
+
+    for block in document.blocks:
+        if block.region_record.decision == Decision.EXCLUDE:
+            continue
+
+        block_text = block.text
+
+        # Find every (start, end, source) range in this block
+        claimed_ranges: list[tuple[int, int, str]] = []
+        for ctext, csource in citation_items:
+            start = 0
+            while True:
+                idx = block_text.find(ctext, start)
+                if idx == -1:
+                    break
+                claimed_ranges.append((idx, idx + len(ctext), csource))
+                start = idx + len(ctext)
+
+        if not claimed_ranges:
+            continue
+
+        for span in block.spans:
+            s_start = span.source.char_start
+            s_end = span.source.char_end
+            for c_start, c_end, c_source in claimed_ranges:
+                if s_start >= c_start and s_end <= c_end:
+                    span.span_type = SpanType.CITATION
+                    span.decision_record = DecisionRecord(
+                        decision=Decision.EXCLUDE,
+                        rule_id="I-CITATION",
+                        confidence=0.9,
+                        reason="In-text citation (excluded by QCAA rules)",
+                        source="auto",
+                    )
+                    # Tag with the citation's source for reporting
+                    span.tags.discard("citation:auto")
+                    span.tags.discard("citation:manual")
+                    span.tags.add(f"citation:{c_source}")
+                    break
+                
+def find_missed_candidates(document: Document) -> list[str]:
+    already = {c.text for c in document.citations}
+    candidates: list[str] = []
+
+    loose_year_paren = re.compile(r"\([^()]{1,80}?(?:19|20)\d{2}[^()]{0,40}?\)")
+
+    for block in document.blocks:
+        if block.region_record.decision == Decision.EXCLUDE:
+            continue
+        if block.region in (Region.TITLE_PAGE, Region.CONTENTS,
+                            Region.ABSTRACT, Region.REFERENCES):
+            continue
+
+        text = block.text
+        for m in loose_year_paren.finditer(text):
+            matched = m.group(0)
+            if matched in already:
                 continue
-            for note in root.iter(f"{W_NS}{tag}"):
-                ntype = note.get(f"{W_NS}type")
-                if ntype in ("separator", "continuationSeparator", "continuationNotice"):
-                    continue
-                t = "".join(n.text or "" for n in note.iter(f"{W_NS}t"))
-                if t.strip():
-                    bucket.append(t)
-    return footnotes, endnotes
+            if matched in candidates:
+                continue
+            candidates.append(matched)
+
+    return candidates
+
+# ============================================================================
+# SECTION 5d — CAPTION / VISUAL ELEMENT DETECTION
+# ============================================================================
+
+QCAA_CAPTION_HELP = """
+------------------------------------------------------------------
+CAPTIONS AND VISUAL ELEMENTS (QCAA rule)
+------------------------------------------------------------------
+QCAA excludes "visual elements associated with the written response"
+-- by-lines, banners, captions and call-outs that are the visual
+elements of written genres suitable for print or online publication
+(literary article, blog, essay, column).
+
+HOWEVER: in science reports and PSMTs, captions and figure labels
+often identify variables, conditions, or what a graph shows. Markers
+generally treat those as information, and they count.
+
+When unsure, ask your teacher. The safest default is to exclude,
+because that is what QCAA's rule says on its face.
+------------------------------------------------------------------
+"""
 
 
-def looks_bibliographic(note_text):
-    t = note_text.lower()
+def detect_captions(document: Document) -> None:
+    """Mark blocks that look like captions/by-lines/source lines."""
+    for block in document.blocks:
+        if block.region_record.decision == Decision.EXCLUDE:
+            continue
+        if block.region in (Region.TITLE_PAGE, Region.CONTENTS,
+                            Region.ABSTRACT, Region.REFERENCES):
+            continue
+
+        is_cap, kind = looks_like_caption(block)
+        if is_cap:
+            block.is_visual = True
+            # Don't use FLAG here — FLAG is reserved for region-level
+            # decisions (appendixes). Captions are their own category and
+            # are resolved by resolve_captions_interactive().
+            # Mark the region_record as "undecided" so count_words treats
+            # it as a flag until the caption resolver runs.
+            block.region_record = DecisionRecord(
+                decision=Decision.UNDECIDED,
+                rule_id=f"R-{kind.upper().replace('-', '_')}",
+                confidence=0.6,
+                reason=f"Possible {kind}: QCAA treats visual elements as excluded",
+                source="auto",
+            )
+
+
+def resolve_captions_interactive(document: Document,
+                                  auto_accept_remaining: bool = False) -> bool:
+    """Prompt the user about each caption. Returns the updated
+    auto_accept_remaining flag."""
+    caption_blocks = [b for b in document.blocks if b.is_visual]
+
+    if not caption_blocks:
+        return auto_accept_remaining
+
+    print()
+    print("=" * 60)
+    print(f"{len(caption_blocks)} caption/visual element(s) detected.")
+    print("=" * 60)
+
+    for i, block in enumerate(caption_blocks, start=1):
+        if block.region_record.decision in (Decision.COUNT, Decision.EXCLUDE):
+            continue  # already resolved
+
+        if auto_accept_remaining:
+            block.region_record.as_manual_override(
+                Decision.EXCLUDE,
+                reason="Auto-accepted suggestion (user chose Accept All)",
+            )
+            continue
+
+        print()
+        print("-" * 60)
+        print(f"Caption {i} of {len(caption_blocks)}")
+        snippet = block.text.strip()
+        if len(snippet) > 120:
+            snippet = snippet[:117] + "..."
+        print(f'  "{snippet}"')
+        print()
+        print("  QCAA's rule: captions and other visual elements of written")
+        print("  genres are excluded from the word count.")
+        print()
+        print("  But: in science reports and PSMTs, captions often identify")
+        print("  variables or conditions, which some markers count as")
+        print("  information.")
+
+        choice = _menu(
+            "How should this caption be counted?",
+            [
+                ("exclude", "Exclude it (QCAA's default: visual elements excluded)"),
+                ("count",   "Count it (it names variables or carries information)"),
+                ("help",    "Explain the QCAA rule for captions"),
+                ("all",     "Accept suggestions for all remaining captions"),
+            ],
+            default_key="exclude",
+        )
+
+        if choice == "help":
+            print(QCAA_CAPTION_HELP)
+            choice = _menu(
+                "How should this caption be counted?",
+                [
+                    ("exclude", "Exclude it (QCAA's default)"),
+                    ("count",   "Count it (it names variables or carries information)"),
+                    ("all",     "Accept suggestions for all remaining captions"),
+                ],
+                default_key="exclude",
+            )
+
+        if choice == "all":
+            auto_accept_remaining = True
+            block.region_record.as_manual_override(
+                Decision.EXCLUDE,
+                reason="Auto-accepted suggestion (user chose Accept All)",
+            )
+        elif choice == "exclude":
+            block.region_record.as_manual_override(
+                Decision.EXCLUDE,
+                reason="User chose to exclude caption",
+            )
+        else:
+            block.region_record.as_manual_override(
+                Decision.COUNT,
+                reason="User chose to count caption",
+            )
+
+    return auto_accept_remaining
+# ============================================================================
+# SECTION 5e — FOOTNOTE / ENDNOTE DETECTION
+# ============================================================================
+
+BIBLIOGRAPHIC_HINTS = (
+    re.compile(r"(?:19|20)\d{2}"),                      # a year
+    re.compile(r"\b(pp?\.|vol\.|no\.|ed\.|doi|isbn|issn)\b", re.IGNORECASE),
+    re.compile(r"\b(press|journal|university|thesis|phd|edition|trans\.|"
+               r"vols?|pub\.|publishing|http|www\.|accessed)\b", re.IGNORECASE),
+    re.compile(r"\bet\s+al\.", re.IGNORECASE),
+)
+
+
+def classify_footnote(text: str) -> tuple[str, float]:
+    """Classify a footnote as bibliographic vs commentary.
+
+    Returns (kind, confidence). kind is 'bibliographic', 'commentary',
+    or 'ambiguous'.
+    """
     score = 0
-    if re.search(r"(?:19|20)\d{2}", t):
-        score += 1
-    if re.search(r"\b(pp?\.|vol\.|no\.|ed\.|doi|http|www\.|isbn|issn)\b", t):
-        score += 1
-    if re.search(r"\b(press|journal|university|phd|thesis|edition|trans\.|vols?)\b", t):
-        score += 1
-    if re.search(r"[\"'“”‘’]", t) and score >= 1:
-        score += 1
-    return score >= 2
+    for pattern in BIBLIOGRAPHIC_HINTS:
+        if pattern.search(text):
+            score += 1
+
+    # Commentary signals: prose-y sentences with personal commentary.
+    # A footnote that is just a citation has almost no lowercase words
+    # outside the citation. A commentary has multiple sentences.
+    prose_sentences = len(re.findall(r"[a-z]{3,}\s+[a-z]{3,}\s+[a-z]{3,}", text))
+
+    if score >= 2 and prose_sentences <= 1:
+        return "bibliographic", 0.85
+    if score <= 1 and prose_sentences >= 2:
+        return "commentary", 0.75
+    return "ambiguous", 0.4
 
 
-# ----------------------------------------------------------------------------
-# Table smart default
-# ----------------------------------------------------------------------------
+def read_footnotes_from_docx(path: str) -> list[Footnote]:
+    """Extract footnotes and endnotes from the docx package."""
+    import zipfile
+    from xml.etree import ElementTree as ET
 
-def table_smart_default(text, profile):
-    """Suggest d/c/i for a table based on its content, biased by profile."""
-    toks = tokenize(text)
-    if not toks:
-        return "d"
-    numeric = sum(1 for t in toks if is_numeric_symbol_token(t))
-    alpha = sum(1 for t in toks if any(ch.isalpha() for ch in t))
-    operators = sum(1 for t in toks if t in "+-×*/÷^=" or re.fullmatch(r"[+\-×*/÷^=]+", t))
-    has_sentence = bool(re.search(r"[a-z]{3,}\s+[a-z]{3,}\s+[a-z]{3,}", text.lower()))
-    ratio_num = numeric / len(toks)
-    bias = profile.get("numeric_table_bias")
-    if has_sentence or (alpha > 8 and ratio_num < 0.6):
-        return "i"
-    if operators >= 3 and ratio_num > 0.3:
-        return "c" if bias in (None, "c") else bias
-    if ratio_num > 0.7:
-        return bias if bias in ("d", "c") else "d"
-    return "i"
+    W_NS_LOCAL = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}"
+    footnotes: list[Footnote] = []
+
+    try:
+        with zipfile.ZipFile(path) as z:
+            names = z.namelist()
+
+            for filename, tag, kind in (
+                ("word/footnotes.xml", "footnote", "footnote"),
+                ("word/endnotes.xml", "endnote", "endnote"),
+            ):
+                if filename not in names:
+                    continue
+                try:
+                    root = ET.fromstring(z.read(filename))
+                except ET.ParseError:
+                    continue
+
+                for note in root.iter(f"{W_NS_LOCAL}{tag}"):
+                    ntype = note.get(f"{W_NS_LOCAL}type")
+                    if ntype in ("separator", "continuationSeparator", "continuationNotice"):
+                        continue
+                    note_id = note.get(f"{W_NS_LOCAL}id") or ""
+                    text = "".join(t.text or "" for t in note.iter(f"{W_NS_LOCAL}t"))
+                    text = text.strip()
+                    if not text:
+                        continue
+                    footnotes.append(Footnote(
+                        footnote_id=note_id,
+                        text=text,
+                        kind=kind,  # type: ignore
+                    ))
+    except (zipfile.BadZipFile, OSError):
+        pass
+
+    return footnotes
 
 
-# ----------------------------------------------------------------------------
-# File picker (kept from v1)
-# ----------------------------------------------------------------------------
+def apply_footnote_suggestions(document: Document) -> None:
+    """Apply the classifier's suggestion to each footnote."""
+    for fn in document.footnotes:
+        kind, conf = classify_footnote(fn.text)
+        fn.suggestion = kind  # type: ignore
+        fn.suggestion_confidence = conf
 
-def get_path_via_dialog():
+
+def resolve_footnotes_interactive(document: Document,
+                                   auto_accept_remaining: bool = False) -> bool:
+    """Prompt the user about each footnote. Returns updated auto flag."""
+    if not document.footnotes:
+        return auto_accept_remaining
+
+    print()
+    print("=" * 60)
+    print(f"{len(document.footnotes)} footnote/endnote(s) detected.")
+    print("=" * 60)
+    print()
+    print("QCAA: footnotes/endnotes are counted UNLESS they are purely")
+    print("bibliographical (i.e. just a reference).")
+
+    for i, fn in enumerate(document.footnotes, start=1):
+        if fn.answer is not None:
+            continue
+
+        if auto_accept_remaining:
+            fn.answer = "exclude" if fn.suggestion == "bibliographic" else "count"
+            fn.answer_record = DecisionRecord(
+                decision=Decision.EXCLUDE if fn.answer == "exclude" else Decision.COUNT,
+                rule_id="F-AUTO",
+                confidence=0.6,
+                reason="Auto-accepted suggestion",
+                source="manual",
+            )
+            continue
+
+        print()
+        print("-" * 60)
+        print(f"Footnote {i} of {len(document.footnotes)} ({fn.kind})")
+        snippet = fn.text if len(fn.text) <= 200 else fn.text[:197] + "..."
+        print(f'  "{snippet}"')
+        print()
+
+        suggestion = fn.suggestion
+        if suggestion == "bibliographic":
+            print(f"  Suggested: bibliographic → exclude (confidence {fn.suggestion_confidence:.2f})")
+            default = "exclude"
+        elif suggestion == "commentary":
+            print(f"  Suggested: commentary → count (confidence {fn.suggestion_confidence:.2f})")
+            default = "count"
+        else:
+            print("  Suggested: could not confidently classify")
+            default = None
+
+        choice = _menu(
+            "How should this footnote be treated?",
+            [
+                ("exclude", "Exclude (it's purely a bibliographic reference)"),
+                ("count",   "Count (it contains commentary or content)"),
+                ("help",    "Explain the QCAA rule for footnotes"),
+                ("all",     "Accept suggestions for all remaining footnotes"),
+            ],
+            default_key=default,
+        )
+
+        if choice == "help":
+            print()
+            print("QCAA rule for footnotes/endnotes:")
+            print("  - Footnotes and endnotes are INCLUDED in the word count,")
+            print("    UNLESS they are used purely for bibliographical purposes.")
+            print("  - 'Bibliographical' means it's just a citation or reference.")
+            print("  - If it contains any commentary, clarification, or prose,")
+            print("    it counts.")
+            choice = _menu(
+                "How should this footnote be treated?",
+                [
+                    ("exclude", "Exclude (bibliographic only)"),
+                    ("count",   "Count (contains commentary or content)"),
+                    ("all",     "Accept suggestions for all remaining footnotes"),
+                ],
+                default_key=default,
+            )
+
+        if choice == "all":
+            auto_accept_remaining = True
+            suggested = "exclude" if fn.suggestion == "bibliographic" else "count"
+            fn.answer = suggested
+            fn.answer_record = DecisionRecord(
+                decision=Decision.EXCLUDE if suggested == "exclude" else Decision.COUNT,
+                rule_id="F-AUTO",
+                confidence=0.6,
+                reason="Auto-accepted suggestion (user chose Accept All)",
+                source="manual",
+            )
+            continue
+
+        fn.answer = choice  # type: ignore
+        fn.answer_record = DecisionRecord(
+            decision=Decision.EXCLUDE if choice == "exclude" else Decision.COUNT,
+            rule_id="F-USER",
+            confidence=1.0,
+            reason=f"User chose '{choice}'",
+            source="manual",
+        )
+
+    return auto_accept_remaining
+
+
+# ============================================================================
+# SECTION 6 — INTERACTIVE FLAG RESOLUTION
+# ============================================================================
+
+QCAA_TABLE_HELP = """
+------------------------------------------------------------------
+TABLES (QCAA rule)
+------------------------------------------------------------------
+  Option 1 — Count the whole table.
+             Use this when the table contains information other
+             than raw or processed data: prose in cells, explanatory
+             labels beyond column headers, annotations, etc.
+
+  Option 2 — Exclude the whole table.
+             Use this for tables that contain only raw data
+             (individual measurements), processed data (means,
+             totals, percentages), or calculation working.
+
+  Option 3 — Count the header row only, exclude the data rows.
+             A middle-ground reading: the column labels
+             ("Temperature", "Trial 1 (s)") count as information,
+             but the data does not.
+
+  Option 4 — Show this message again.
+------------------------------------------------------------------
+"""
+
+
+def preview_table(table: Table, max_rows: int = 4, max_width: int = 70) -> str:
+    lines = []
+    for r_idx, row in enumerate(table.rows):
+        if r_idx >= max_rows:
+            lines.append(f"... ({len(table.rows) - max_rows} more row(s))")
+            break
+        cells = []
+        for cell in row:
+            t = cell.text.strip().replace("\n", " ")
+            if len(t) > 20:
+                t = t[:17] + "..."
+            cells.append(t)
+        line = " | ".join(cells)
+        if len(line) > max_width:
+            line = line[:max_width - 3] + "..."
+        lines.append(line)
+    return "\n".join(lines)
+
+
+def _menu(question: str, options: list[tuple[str, str]],
+          default_key: Optional[str] = None) -> str:
+    print()
+    print(question)
+    for i, (key, label) in enumerate(options, start=1):
+        marker = " (suggested)" if key == default_key else ""
+        print(f"  [{i}] {label}{marker}")
+
+    while True:
+        default_hint = ""
+        if default_key is not None:
+            for i, (key, _) in enumerate(options, start=1):
+                if key == default_key:
+                    default_hint = f" [{i}]"
+                    break
+        try:
+            raw = input(f"\nYour choice{default_hint}: ").strip()
+        except EOFError:
+            raw = ""
+
+        if not raw and default_key is not None:
+            return default_key
+
+        if not raw.isdigit():
+            print("Please type a number.")
+            continue
+
+        idx = int(raw) - 1
+        if 0 <= idx < len(options):
+            return options[idx][0]
+
+        print(f"Please type a number between 1 and {len(options)}.")
+
+
+def resolve_flags_interactive(document: Document) -> None:
+    auto_accept_remaining = False
+
+    # --- 6a. Appendix / region flags ---------------------------------------
+    # Prompt once per appendix region. All blocks in the same region get
+    # the same decision.
+    handled_regions: set[int] = set()
+
+    for block in document.blocks:
+        if block.region_record.decision != Decision.FLAG:
+            continue
+        if block.region != Region.APPENDIX:
+            continue
+
+        region_key = id(block.region_record)
+
+        if region_key in handled_regions:
+            continue
+
+        # Find all FLAG blocks in APPENDIX region and treat them as one.
+        region_blocks = [
+            b for b in document.blocks
+            if b.region == Region.APPENDIX
+            and b.region_record.decision == Decision.FLAG
+        ]
+        if not region_blocks:
+            continue
+
+        first_block = region_blocks[0]
+
+        if auto_accept_remaining:
+            for b in region_blocks:
+                b.region_record.as_manual_override(
+                    Decision.EXCLUDE,
+                    reason="Auto-accepted suggestion (user chose Accept All earlier)",
+                )
+                handled_regions.add(id(b.region_record))
+            continue
+
+        print()
+        print("-" * 60)
+        print(f"Appendix region detected ({len(region_blocks)} block(s))")
+        snippet = first_block.text[:80]
+        if len(first_block.text) > 80:
+            snippet += "..."
+        print(f'Starts at: "{snippet}"')
+        print()
+        print("Appendixes are only excluded if they contain supplementary")
+        print("material that is NOT used as evidence when marking.")
+        print()
+
+        choice = _menu(
+            "How should this appendix be treated?",
+            [
+                ("exclude", "Exclude this appendix from the count"),
+                ("include", "Include this appendix in the count"),
+                ("help",    "Explain the QCAA rule for appendixes"),
+                ("all",     "Accept the tool's suggestions for all remaining prompts"),
+            ],
+            default_key="exclude",
+        )
+
+        if choice == "help":
+            print()
+            print("Appendixes (QCAA rule):")
+            print("  Appendixes are excluded ONLY if they contain supplementary")
+            print("  material that is not used as evidence when marking. If a")
+            print("  marker would need to read it to assess your response, it")
+            print("  counts. When in doubt, exclude it.")
+            choice = _menu(
+                "How should this appendix be treated?",
+                [
+                    ("exclude", "Exclude this appendix from the count"),
+                    ("include", "Include this appendix in the count"),
+                    ("all",     "Accept the tool's suggestions for all remaining prompts"),
+                ],
+                default_key="exclude",
+            )
+
+        if choice == "all":
+            auto_accept_remaining = True
+            for b in region_blocks:
+                b.region_record.as_manual_override(
+                    Decision.EXCLUDE,
+                    reason="Auto-accepted suggestion (user chose Accept All)",
+                )
+                handled_regions.add(id(b.region_record))
+        elif choice == "exclude":
+            for b in region_blocks:
+                b.region_record.as_manual_override(
+                    Decision.EXCLUDE,
+                    reason="User chose to exclude this appendix",
+                )
+                handled_regions.add(id(b.region_record))
+        else:
+            for b in region_blocks:
+                b.region_record.as_manual_override(
+                    Decision.COUNT,
+                    reason="User chose to include this appendix",
+                )
+                handled_regions.add(id(b.region_record))
+
+    if document.tables:
+        print()
+        print("=" * 60)
+        print(f"{len(document.tables)} table(s) found. Each will be reviewed.")
+        print("=" * 60)
+
+        for i, table in enumerate(document.tables, start=1):
+            if table.answer is not None:
+                continue
+
+            if auto_accept_remaining:
+                suggested = suggest_table_answer(table)
+                table.answer = suggested
+                _apply_table_answer(table, suggested,
+                                    reason="Auto-accepted suggestion")
+                continue
+
+            print()
+            print("-" * 60)
+            print(f"Table {i} of {len(document.tables)}")
+            print(f"Suggested: {describe_suggestion(table)} "
+                  f"({describe_confidence(table.suggestion_confidence)})")
+            print()
+            print(preview_table(table))
+            print()
+            print(f"  {table.word_count} word(s) in this table.")
+
+            default_key = None
+            if table_has_strong_default(table):
+                default_key = suggest_table_answer(table).value
+
+            choice = _menu(
+                "How should this table be counted?",
+                [
+                    ("count_all",    "Count the whole table (it contains information)"),
+                    ("exclude_all",  "Exclude the whole table (raw data or calculations only)"),
+                    ("headers_only", "Count the header row only, exclude the data rows"),
+                    ("help",         "Explain the QCAA rule for tables"),
+                    ("all",          "Accept the tool's suggestions for all remaining tables"),
+                ],
+                default_key=default_key,
+            )
+
+            if choice == "help":
+                print(QCAA_TABLE_HELP)
+                choice = _menu(
+                    "How should this table be counted?",
+                    [
+                        ("count_all",    "Count the whole table (it contains information)"),
+                        ("exclude_all",  "Exclude the whole table (raw data or calculations only)"),
+                        ("headers_only", "Count the header row only, exclude the data rows"),
+                        ("all",          "Accept the tool's suggestions for all remaining tables"),
+                    ],
+                    default_key=default_key,
+                )
+
+            if choice == "all":
+                auto_accept_remaining = True
+                suggested = suggest_table_answer(table)
+                table.answer = suggested
+                _apply_table_answer(table, suggested,
+                                    reason="Auto-accepted suggestion (user chose Accept All)")
+                continue
+
+            table.answer = TableAnswer(choice)
+            _apply_table_answer(table, table.answer,
+                                reason=f"User chose '{choice}'")
+
+    # --- 6d. Captions -----------------------------------------------------
+    auto_accept_remaining = resolve_captions_interactive(
+        document, auto_accept_remaining
+    )
+
+    # --- 6e. Footnotes ----------------------------------------------------
+    auto_accept_remaining = resolve_footnotes_interactive(
+        document, auto_accept_remaining
+    )
+
+    # --- 6f. Citations ----------------------------------------------------
+    _resolve_citations_interactive(document)
+
+
+def _resolve_citations_interactive(document: Document) -> None:
+    print()
+    print("=" * 60)
+    print("Citation detection")
+    print("=" * 60)
+    print()
+    print("Note: this tool can only detect APA 7 style citations with good")
+    print("accuracy. Other styles (MLA, Chicago, Harvard, numbered, etc.)")
+    print("may not be detected correctly. Check the report at the end.")
+    print()
+
+    auto_citations = [c for c in document.citations if c.source == "auto"]
+
+    if auto_citations:
+        print(f"Found {len(auto_citations)} in-text citation(s):")
+        print()
+        for i, c in enumerate(auto_citations, start=1):
+            occ = "" if c.occurrences == 1 else f"  (×{c.occurrences})"
+            print(f"  {i:>3}. {c.text}{occ}")
+        print()
+        print("These will be excluded from the word count.")
+    else:
+        print("No APA 7 in-text citations detected.")
+    print()
+
+    apply_citation_exclusions(document)
+
+    # -- Candidates the detector didn't auto-exclude -----------------------
+    missed = find_missed_candidates(document)
+    if not missed:
+        return
+
+    print("-" * 60)
+    print(f"{len(missed)} other parenthetical(s) contain a 4-digit year but")
+    print("were NOT auto-excluded. They might be citations, or might be")
+    print("ordinary references (e.g. to a figure or table).")
+    print()
+    for i, m in enumerate(missed, start=1):
+        print(f"  [{i}] {m}")
+    print()
+    print("Choose which ones to exclude:")
+    print("  Type a number to exclude that one (you can repeat).")
+    print("  Type 'a' to exclude all remaining.")
+    print("  Press Enter to finish and count the rest normally.")
+    print()
+
+    extra: list[Citation] = []
+    remaining = list(enumerate(missed, start=1))   # [(1, "..."), (2, "..."), ...]
+
+    while True:
+        # Re-print remaining candidates (or a note if none left)
+        if remaining:
+            print("Remaining:")
+            for i, m in remaining:
+                print(f"  [{i}] {m}")
+            print()
+        else:
+            print("  (No candidates remaining.)")
+            print()
+
+        try:
+            raw = input("> ").strip()
+        except EOFError:
+            break
+
+        # Blank line = exit the loop
+        if not raw:
+            break
+
+        if raw.lower() == "a":
+            if not remaining:
+                print("  No candidates to exclude.")
+                continue
+            for idx, m in remaining:
+                count = _count_occurrences_in_body(document, m)
+                if count:
+                    extra.append(Citation(text=m, occurrences=count, source="manual"))
+            remaining = []
+            print("  Excluded all remaining candidates.")
+            continue
+
+        if not raw.isdigit():
+            print("  Please type a number, 'a' for all, or Enter to finish.")
+            continue
+
+        choice = int(raw)
+        match = next((m for idx, m in remaining if idx == choice), None)
+        if match is None:
+            print(f"  No candidate #{choice} in the remaining list.")
+            continue
+
+        count = _count_occurrences_in_body(document, match)
+        if count == 0:
+            print(f"  ✗ Not found in body: {match}")
+        else:
+            extra.append(Citation(text=match, occurrences=count, source="manual"))
+            print(f"  ✓ Excluded {count} occurrence(s).")
+        # Remove from the remaining pool
+        remaining = [(i, m) for i, m in remaining if m != match]
+
+    if extra:
+        document.citations.extend(extra)
+        apply_citation_exclusions(document)
+        print()
+        print(f"Added {len(extra)} citation(s).")
+        
+        
+def _count_occurrences_in_body(document: Document, needle: str) -> int:
+    """Count occurrences of a substring in countable body blocks.
+
+    Tries exact match first, then falls back to case-insensitive match.
+    This handles the common case where a user types a citation slightly
+    differently from how it appears in the document.
+    """
+    if not needle:
+        return 0
+
+    total = 0
+    needle_lower = needle.lower()
+    for block in document.blocks:
+        if block.region_record.decision == Decision.EXCLUDE:
+            continue
+        if block.region in (Region.TITLE_PAGE, Region.CONTENTS,
+                            Region.ABSTRACT, Region.REFERENCES):
+            continue
+        text = block.text
+        # Exact count
+        n = text.count(needle)
+        if n == 0:
+            # Case-insensitive fallback
+            n = text.lower().count(needle_lower)
+        total += n
+    return total
+
+
+def _apply_table_answer(table: Table, answer: TableAnswer, reason: str) -> None:
+    """Apply the user's (or auto-accepted) answer to this table.
+
+    Rule of thumb (from my teacher): "if it's a word, it counts."
+    QCAA then carves out exceptions — numbers, symbols, equations,
+    calculations, and raw data in tables. So even when the user says
+    "count the whole table", we still run the standard span-level
+    classification: numbers, symbols, and equations inside the table
+    are still excluded. The table-level answer only decides whether
+    the table's *prose* content counts.
+    """
+    if answer == TableAnswer.COUNT_ALL:
+        # Apply standard span classification to every cell.
+        # Prose counts; numbers, symbols, and equations are excluded.
+        for cell in table.iter_cells():
+            for span in cell.spans:
+                _classify_span_in_place(span, reason_prefix=reason)
+        table.answer_record = DecisionRecord(
+            decision=Decision.COUNT, rule_id="T-COUNT",
+            confidence=1.0, reason=reason, source="manual",
+        )
+
+    elif answer == TableAnswer.EXCLUDE_ALL:
+        for cell in table.iter_cells():
+            for span in cell.spans:
+                span.decision_record = DecisionRecord(
+                    decision=Decision.EXCLUDE,
+                    rule_id="T-EXCLUDE-ALL",
+                    confidence=1.0,
+                    reason=reason,
+                    source="manual",
+                )
+        table.answer_record = DecisionRecord(
+            decision=Decision.EXCLUDE, rule_id="T-EXCLUDE-ALL",
+            confidence=1.0, reason=reason, source="manual",
+        )
+
+    elif answer == TableAnswer.HEADERS_ONLY:
+        header_idx = table.header_row_index
+        for r_idx, row in enumerate(table.rows):
+            in_header = (r_idx == header_idx)
+            for cell in row:
+                for span in cell.spans:
+                    if in_header:
+                        # Header cells still go through standard rules
+                        _classify_span_in_place(
+                            span, reason_prefix=f"{reason} (header row)"
+                        )
+                    else:
+                        span.decision_record = DecisionRecord(
+                            decision=Decision.EXCLUDE,
+                            rule_id="T-DATA-ROW",
+                            confidence=1.0,
+                            reason=f"{reason} (data row)",
+                            source="manual",
+                        )
+        table.answer_record = DecisionRecord(
+            decision=Decision.COUNT, rule_id="T-HEADERS-ONLY",
+            confidence=1.0, reason=reason, source="manual",
+        )
+
+
+def _classify_span_in_place(span: Span, reason_prefix: str = "") -> None:
+    """Classify a single span using the standard QCAA span rules.
+
+    Used inside tables so that numbers, symbols, and equations inside
+    a "counted" table are still excluded. Mutates the span in place.
+
+    Rule of thumb: if it's a word, it counts; QCAA then carves out
+    exceptions for numbers, symbols, equations, and calculations.
+    """
+    tok = span.text
+
+    if is_equation_token(tok):
+        span.span_type = SpanType.EQUATION
+        span.decision_record = DecisionRecord(
+            decision=Decision.EXCLUDE,
+            rule_id="I-EQUATION",
+            confidence=0.9,
+            reason=f"{reason_prefix}: equation/calculation excluded by QCAA rules",
+            source="manual",
+        )
+    elif is_symbol_token(tok):
+        span.span_type = SpanType.SYMBOL
+        span.decision_record = DecisionRecord(
+            decision=Decision.EXCLUDE,
+            rule_id="I-SYMBOL",
+            confidence=0.95,
+            reason=f"{reason_prefix}: symbol excluded by QCAA rules",
+            source="manual",
+        )
+    elif is_numeric_token(tok):
+        span.span_type = SpanType.NUMBER
+        span.decision_record = DecisionRecord(
+            decision=Decision.EXCLUDE,
+            rule_id="I-NUMBER",
+            confidence=0.95,
+            reason=f"{reason_prefix}: number excluded by QCAA rules",
+            source="manual",
+        )
+    else:
+        span.span_type = SpanType.WORD
+        span.decision_record = DecisionRecord(
+            decision=Decision.COUNT,
+            rule_id="I-WORD",
+            confidence=1.0,
+            reason=f"{reason_prefix}: counted as a word",
+            source="manual",
+        )
+# ============================================================================
+# SECTION 7 — COUNT
+# ============================================================================
+def count_words(document: Document) -> dict:
+    buckets: dict[str, int] = defaultdict(int)
+    total = 0
+    table_summary: list[dict] = []
+    citation_summary = {"auto": 0, "auto_words": 0,
+                        "manual": 0, "manual_words": 0}
+    total_math_objects = 0
+
+    for block in document.blocks:
+        total_math_objects += block.math_object_count
+
+        if block.region_record.decision == Decision.EXCLUDE:
+            buckets[f"region:{block.region.value}"] += len(block.spans)
+            continue
+        if block.region_record.decision in (Decision.FLAG, Decision.UNDECIDED):
+            buckets[f"flagged:{block.region.value}"] += len(block.spans)
+            continue
+
+        for span in block.spans:
+            if span.decision_record.decision == Decision.COUNT:
+                total += 1
+            else:
+                rule = span.decision_record.rule_id or "unknown"
+                buckets[f"excluded:{rule}"] += 1
+
+    for table in document.tables:
+        counted = 0
+        excluded = 0
+        for cell in table.iter_cells():
+            total_math_objects += cell.math_object_count
+            for span in cell.spans:
+                if span.decision_record.decision == Decision.COUNT:
+                    total += 1
+                    counted += 1
+                else:
+                    excluded += 1
+
+        answer_label = table.answer.value if table.answer else "unresolved"
+        table_summary.append({
+            "index": table.table_index + 1,
+            "suggestion": table.suggestion.value,
+            "answer": answer_label,
+            "counted": counted,
+            "excluded": excluded,
+        })
+        if excluded:
+            buckets[f"table:{answer_label}"] += excluded
+    # --- Footnotes / endnotes ---
+    footnote_summary = {"counted": 0, "counted_words": 0,
+                        "excluded": 0, "excluded_words": 0}
+
+    for fn in document.footnotes:
+        if fn.answer == "count" or (fn.answer is None and fn.suggestion == "commentary"):
+            total += fn.word_count
+            footnote_summary["counted"] += 1
+            footnote_summary["counted_words"] += fn.word_count
+        else:
+            buckets["footnotes (bibliographic)"] += fn.word_count
+            footnote_summary["excluded"] += 1
+            footnote_summary["excluded_words"] += fn.word_count
+    
+    
+    for block in document.blocks:
+        if block.region_record.decision == Decision.EXCLUDE:
+            continue
+        for span in block.spans:
+            if span.decision_record.rule_id == "I-CITATION":
+                if "citation:manual" in span.tags:
+                    citation_summary["manual_words"] += 1
+                else:
+                    citation_summary["auto_words"] += 1
+    citation_summary["auto"] = sum(1 for c in document.citations if c.source == "auto")
+    citation_summary["manual"] = sum(1 for c in document.citations if c.source == "manual")
+
+    return {
+        "total": total,
+        "buckets": dict(buckets),
+        "tables": table_summary,
+        "citations": citation_summary,
+        "math_objects": total_math_objects,
+    }
+
+# ============================================================================
+# SECTION 8 — REPORT
+# ============================================================================
+
+def print_report(document: Document, result: dict) -> None:
+    print()
+    print("=" * 60)
+    print("QCAA WORD COUNT REPORT")
+    print(f"File: {document.filename}")
+    print("=" * 60)
+    print()
+    print(f"  FINAL WORD COUNT: {result['total']}")
+    print()
+
+    if result["buckets"]:
+        print("Excluded / flagged (not counted):")
+        for key in sorted(result["buckets"]):
+            print(f"  {key:<40} {result['buckets'][key]:>5} word(s)")
+        print()
+
+    if result.get("tables"):
+        print("Tables:")
+        for t in result["tables"]:
+            answer_label = {
+                "count_all": "counted whole",
+                "exclude_all": "excluded whole",
+                "headers_only": "headers only",
+                "unresolved": "unresolved",
+            }.get(t["answer"], t["answer"])
+            print(f"  Table {t['index']}: "
+                  f"suggested={t['suggestion']:<12} "
+                  f"chosen={answer_label:<15} "
+                  f"counted={t['counted']:<4} "
+                  f"excluded={t['excluded']}")
+        print()
+        
+        
+
+    cit = result.get("citations", {})
+    if cit.get("auto") or cit.get("manual"):
+        print("In-text citations:")
+        if cit["auto"]:
+            print(f"  Auto-detected (APA 7 patterns):   {cit['auto']:>4} "
+                  f"({cit['auto_words']} words)")
+        if cit["manual"]:
+            print(f"  Manually added by user:           {cit['manual']:>4} "
+                  f"({cit['manual_words']} words)")
+        print()
+
+    fn = result.get("footnotes", {})
+    if fn.get("counted") or fn.get("excluded"):
+        print("Footnotes / endnotes:")
+        if fn["counted"]:
+            print(f"  Counted (commentary):             {fn['counted']:>4} "
+                  f"({fn['counted_words']} words)")
+        if fn["excluded"]:
+            print(f"  Excluded (bibliographic):         {fn['excluded']:>4} "
+                  f"({fn['excluded_words']} words)")
+        print()
+
+    if result.get("math_objects"):
+        print(f"Math objects (OMML):              {result['math_objects']:>4} "
+              f"(excluded, not counted)")
+        print()
+
+    print("Note: Citation detection uses APA 7 patterns. If your citations")
+    print("use a different style (MLA, Chicago, Harvard, numbered, etc.),")
+    print("they may be counted as ordinary words. Review the report and use")
+    print("the manual citation entry if any were missed.")
+    print()
+    print("This version does not yet handle:")
+    print("  - Equations outside tables or math objects (typed as plain text)")
+    print("  - Text boxes and SmartArt")
+    print("  - Manual [[QCAA_EXCLUDE]] markers")
+    print()
+
+
+# ============================================================================
+# SECTION 9 — FILE PICKER
+# ============================================================================
+
+def pick_file() -> str | None:
     try:
         import tkinter as tk
         from tkinter import filedialog
     except Exception:
         return None
+
+    root = tk.Tk()
+    root.withdraw()
     try:
-        root = tk.Tk()
-        root.withdraw()
-        try:
-            root.attributes("-topmost", True)
-        except Exception:
-            pass
-        path = filedialog.askopenfilename(
-            title="Select your Word document",
-            filetypes=[("Word documents", "*.docx"), ("All files", "*.*")],
-        )
-        root.destroy()
-        return path or None
+        root.attributes("-topmost", True)
     except Exception:
-        return None
+        pass
+    path = filedialog.askopenfilename(
+        title="Select your Word document",
+        filetypes=[("Word documents", "*.docx"), ("All files", "*.*")],
+    )
+    root.destroy()
+    return path or None
 
 
-# ----------------------------------------------------------------------------
-# Main per-file analysis
-# ----------------------------------------------------------------------------
+# ============================================================================
+# SECTION 10 — ENTRY POINT + --explain
+# ============================================================================
+QCAA_RULES_TEXT = """\
+QCAA WORD-LENGTH RULES (official summary)
+------------------------------------------
 
-def analyse_file(path, args, profile, decisions, out=print):
-    document = docx.Document(path)
-    doc = Doc(path)
+INCLUDED:
+  - all words in the text of the response
+  - title, headings and subheadings
+  - tables, figures, maps and diagrams containing information other
+    than raw or processed data (the whole item counts)
+  - quotations
+  - footnotes and endnotes (unless used for bibliographical purposes)
+  - abbreviations, including initialisms (e.g. LPG), units of
+    measurement (e.g. kg, m), and chemical formulas (e.g. KOH, HCl)
 
-    current_sha1 = sha1_file(path)
+EXCLUDED:
+  - title pages
+  - contents pages
+  - abstract
+  - visual elements associated with the written response
+    (e.g. by-lines, banners, captions and call-outs)
+  - raw or processed data in tables, figures and diagrams
+  - numbers, symbols, equations and calculations
+  - bibliography / reference list
+  - appendixes (only if supplementary-only)
+  - page numbers
+  - in-text citations
+  - blank pages
 
-    if decisions.data.get("file_sha1") and decisions.data["file_sha1"] != current_sha1:
-        out(c(
-            "Warning: the file has changed since these saved decisions "
-            "were made. Old position-based decisions will be cleared.",
-            "yellow"
-        ))
+HOW THIS TOOL HANDLES THEM:
+  The tool applies the same rules regardless of the assessment type
+  (student experiment, PSMT, extended response, essay, etc.). It does
+  not need to be told what kind of document it is looking at.
 
-        decisions.data["decisions"] = {}
-        decisions.data["auto"] = []
+  - Title page / contents / abstract / references: auto-excluded.
+  - Appendixes: flagged; user confirms whether supplementary-only.
+  - Tables: classified and prompted; user confirms each one.
+  - Captions: flagged; user confirms each one.
+  - Footnotes/endnotes: classified and prompted.
+  - Citations: APA 7 patterns auto-detected; user can add missed ones.
+  - Numbers, symbols, equations, math objects: auto-excluded.
+  - Everything else: counted.
 
-    decisions.data["file_sha1"] = current_sha1
+LIMITATIONS:
+  - Citation detection is tuned for APA 7. Other styles may be missed.
+  - Equations and math typed as images (not text) cannot be read.
+  - Footnotes and text boxes are handled, but SmartArt is not.
+"""
 
-    interactive = not args.non_interactive
+def run(path: str) -> int:
 
-    if profile["guidance"]:
-        out(c("\n" + profile["guidance"], "cyan"))
+    if not os.path.isfile(path):
+        print(f"Couldn't find a file at: {path}")
+        return 2
+    if not path.lower().endswith(".docx"):
+        print(f"'{path}' doesn't look like a .docx file.")
+        return 2
+    
+    print(f"Loading: {path}")
+    document = ingest(path)
+    print(f"  Found {len(document.blocks)} paragraph(s)")
+    print(f"  Found {len(document.tables)} table(s)")
+    math_total = sum(b.math_object_count for b in document.blocks)
+    if math_total:
+        print(f"  Found {math_total} math object(s) (equation editor)")
+        for table in document.tables:
+            table.suggestion, table.suggestion_confidence = classify_table(table)
 
-    # ---- 1. unstyled heading confirmation ----------------------------------
-    confirmed_headings = set()
-    heading_candidates = find_heading_candidates(doc, confirmed_headings)
-    if heading_candidates:
-        out(f"\nFound {len(heading_candidates)} line(s) that might be unstyled section headings.")
-        for i, text in heading_candidates:
-            ans = decisions.resolve(
-                f"heading:{text}",
-                f'\nIs "{text}" a section heading (like "Results" or "Method")?',
-                ("y", "n"), "n",
-                help_text="Say yes only if this line titles the section that follows it. "
-                          "Say no if it is just emphasised text inside a sentence.",
-                interactive=interactive,
-            )
-            if ans == "y":
-                confirmed_headings.add(text)
+    detect_regions(document)
+    apply_regional_decisions(document)
+    classify_and_decide_spans(document)
 
-    # ---- 2. front matter ----------------------------------------------------
-    frontmatter = find_front_matter(doc, confirmed_headings)
-    fm_indices, fm_words = set(), 0
-    if frontmatter:
-        indices, lines, words = frontmatter
-        preview = " | ".join(lines[:4])
-        more = f" ... and {len(lines) - 4} more line(s)" if len(lines) > 4 else ""
-        out(f"\nPossible front matter (title page / declaration): {len(lines)} line(s), {words} words.")
-        out(f"  {preview}{more}")
-        ans = decisions.resolve(
-            "frontmatter", "Exclude this whole block as title page / declaration / front matter?",
-            ("y", "n"), "y" if words <= 300 else "n",
-            help_text=FRONTMATTER_EXPLANATION, interactive=interactive,
-        )
-        if ans == "y":
-            fm_indices, fm_words = set(indices), words
+    # Caption detection (before interactive resolution so flags are ready)
+    detect_captions(document)
 
-    # ---- 3. citations --------------------------------------------------------
-    citation_texts = list(doc.fields["citation_texts"])
-    if citation_texts:
-        out(f"\nAuto-detected {len(citation_texts)} citation field(s) (Word/Zotero/EndNote/Mendeley) -- excluded.")
-        for ct in citation_texts:
-            decisions.record_auto("cite:" + ct, "field", "citation field")
-    manual_cites = find_citation_candidates(doc, confirmed_headings)
-    if manual_cites:
-        out(f"\nFound {len(manual_cites)} possible typed-out in-text citation(s).")
-        for key, (match, context, _bi) in manual_cites.items():
-            is_bare_year = bool(BARE_YEAR_RE.fullmatch(match))
-            default = "n" if is_bare_year else "y"
-            ans = decisions.resolve(
-                key, f'\n...{context}...\nIs "{match}" an in-text citation?',
-                ("y", "n"), default,
-                help_text="Confirm only if this is a source citation. Bare years like "
-                          "(2020) default to no because they often appear in ordinary text.",
-                interactive=interactive,
-            )
-            if ans == "y":
-                citation_texts.append(match)
+    # Footnotes (read from docx, classify, ready to prompt)
+    document.footnotes = read_footnotes_from_docx(path)
+    apply_footnote_suggestions(document)
 
-    # ---- 4. equations / calculations ----------------------------------------
-    equation_items = {}   # key -> (text, block_index)
-    psmt_unrecognised_math = []
-    eq_candidates, math_paras = find_equation_candidates(doc, confirmed_headings)
-    if math_paras:
-        out(f"\nAuto-noted {len(math_paras)} math object paragraph(s) (Word equation editor) "
-            "-- their content is excluded automatically as equations.")
-    if eq_candidates:
-        out(f"\nFound {len(eq_candidates)} possible equation/calculation item(s).")
-        for key, (match, context, bi) in eq_candidates.items():
-            calcish = bool(CALC_CONTINUATION_RE.match(match.strip()) or CALC_LINE_RE.match(match.strip()))
-            default = profile["calc_default"] if profile["calc_default"] in ("y", "n") else ("y" if calcish else "n")
-            ans = decisions.resolve(
-                key, f'\n...{context}...\nExclude "{match.strip()}" as an equation/calculation?',
-                ("y", "n"), default,
-                help_text="Yes if this is a mathematical expression or a worked-calculation "
-                          "line (e.g. '= 4.0 / 40.0'). No if it is ordinary prose that happens "
-                          "to contain an equals sign.",
-                interactive=interactive,
-            )
-            if ans == "y":
-                equation_items[key] = (match, bi)
+    # Citations
+    document.citations = collect_citations(document)
 
-    # ---- 5. visual elements --------------------------------------------------
-    visual_items = {}     # key -> (substring, block_index)
-    vis_candidates = find_visual_candidates(doc, confirmed_headings)
-    if vis_candidates:
-        out(f"\nFound {len(vis_candidates)} possible visual element(s) (captions/by-lines/source lines).")
-        for key, (substr, kind, bi, full) in vis_candidates.items():
-            if kind == "caption":
-                default = profile["caption_default"] if profile["caption_default"] in ("y", "n") else "n"
-            elif kind == "by-line":
-                default = profile["byline_default"] if profile["byline_default"] in ("y", "n") else "n"
-            else:
-                default = "y" if kind == "source line" else "n"
-            ans = decisions.resolve(
-                key, f'\n({kind}) "{full}"\nExclude this as a visual element?',
-                ("y", "n"), default,
-                help_text=VISUAL_ELEMENT_EXPLANATION, interactive=interactive,
-            )
-            if ans == "y":
-                visual_items[key] = (substr, bi)
+    # Interactive resolution (tables, captions, footnotes, citations)
+    resolve_flags_interactive(document)
 
-    # ---- 6. figures -----------------------------------------------------------
-    figure_data_only = {}  # block_index -> inner text to exclude
-    figure_add = []        # (words, label) to ADD (SmartArt prose the tool can now read)
-    fig_candidates = find_figure_candidates(doc, confirmed_headings)
-    if fig_candidates:
-        out(f"\nFound {len(fig_candidates)} figure/diagram candidate(s).")
-        for fig in fig_candidates:
-            label = f"Figure candidate {fig['idx']}"
-            parts = []
-            if fig.get("inner"):
-                parts.append(f'in-paragraph text: "{fig["inner"][:120]}"')
-            if fig.get("smartart"):
-                part_name, txt = fig["smartart"]
-                parts.append(f"SmartArt text ({part_name}): \"{txt[:120]}\"")
-            shown = "\n  ".join(parts) if parts else "(no readable internal text)"
-            default = "n"
-            ans = decisions.resolve(
-                f'figure:{fig["idx"]}',
-                f"\n{label} has:\n  {shown}\n"
-                "Does this figure contain information other than raw/processed data?",
-                ("y", "n"), default,
-                help_text=RAW_DATA_EXPLANATION, interactive=interactive,
-            )
-            if ans == "n":
-                if fig.get("inner") and fig["block"] is not None:
-                    figure_data_only[fig["block"]] = fig["inner"]
-                if fig.get("smartart"):
-                    figure_add.append((0, label))  # nothing to add: text not in body gross
-            else:
-                if fig.get("smartart"):
-                    figure_add.append((word_count(fig["smartart"][1]), label + " (SmartArt text)"))
-
-    # ---- 7. footnotes / endnotes ----------------------------------------------
-    footnotes, endnotes = get_note_texts(path)
-    fn_words = sum(word_count(t) for t in footnotes)
-    en_words = sum(word_count(t) for t in endnotes)
-    fn_exclude, en_exclude = 0, 0
-
-    def ask_notes(kind, notes, total_words):
-        if total_words == 0:
-            return 0, []
-        bib = [looks_bibliographic(t) for t in notes]
-        default = "y" if (bib and all(bib)) else ("m" if any(bib) else "n")
-        ans = decisions.resolve(
-            f"{kind}:all",
-            f"\n{kind.capitalize()} contain {total_words} words total.\n"
-            "Are they ALL purely bibliographical?",
-            ("y", "n", "m"), default,
-            help_text="y = every note is just a citation/reference.\n"
-                      "n = none are purely bibliographic (all count).\n"
-                      "m = mixed; you will be asked about each one.",
-            interactive=interactive,
-        )
-        excluded = 0
-        if ans == "y":
-            return total_words, []
-        if ans == "m":
-            out(f"Confirming {kind} one at a time:")
-            kept_numeric = []
-            for i, t in enumerate(notes, 1):
-                w = word_count(t)
-                preview = t[:100] + ("..." if len(t) > 100 else "")
-                a = decisions.resolve(
-                    f"{kind}:{i}",
-                    f'\n{kind.capitalize()} {i} ({w} words): "{preview}"\n'
-                    "Is this purely bibliographical (excluded)?",
-                    ("y", "n"), "y" if looks_bibliographic(t) else "n",
-                    interactive=interactive,
-                )
-                if a == "y":
-                    excluded += w
-                else:
-                    kept_numeric.append(t)
-            return excluded, kept_numeric
-        return 0, notes
-
-    fn_excluded, fn_kept = ask_notes("footnotes", footnotes, fn_words)
-    en_excluded, en_kept = ask_notes("endnotes", endnotes, en_words)
-
-    # ---- 8. counting walk -------------------------------------------------------
-    gross = 0
-    buckets = defaultdict(int)
-    tracker = ExclusionTracker()
-    root = Node(level=-1, title="(document)")
-    stack = [root]
-    front_node = Node(level=0, title="(front matter / title page)", excluded=True)
-    if fm_indices:
-        root.children.append(front_node)
-
-    table_answers = {}    # block index -> d/c/i
-    table_info = {}       # block index -> (words, preview)
-
-        # pass A: collect tables for decisions
-    for i, (kind, el) in enumerate(doc.blocks):
-        if kind == "tbl":
-            text = strip_markers(doc.visible_text(el))
-            table_info[i] = (
-                word_count(text),
-                text.replace("\n", " ")[:150]
-            )
-
-    if table_info:
-        out(f"\nFound {len(table_info)} table(s).")
-        for i, (words, preview) in table_info.items():
-            td = profile["table_default"]
-            default = (
-                table_smart_default(
-                    doc.visible_text(doc.blocks[i][1]),
-                    profile
-                )
-                if td == "smart"
-                else td
-            )
-
-            ans = decisions.resolve(
-                f"table:{i}",
-                f'\nTable at block {i} ({words} words): "{preview}..."\n'
-                "Is this table:\n"
-                "  d = raw or processed data only (excluded)\n"
-                "  c = calculation working only (excluded)\n"
-                "  i = contains information other than raw/processed data (included)",
-                ("d", "c", "i"),
-                default,
-                help_text=RAW_DATA_EXPLANATION,
-                interactive=interactive,
-            )
-            table_answers[i] = ans
-    for i, (kind, el) in enumerate(doc.blocks):
-        raw = doc.visible_text(el)
-        has_start, has_end = START_MARK in raw, END_MARK in raw
-        text = strip_markers(raw)
-        words = word_count(text)
-
-        if i in fm_indices:
-            gross += words
-            buckets["title page"] += words
-            front_node.own_words += words
-            continue
-
-        if kind == "p":
-            lvl = effective_heading_level(doc, el, confirmed_headings)
-            if lvl is not None:
-                tracker.visit_heading(lvl, text)
-                while stack[-1].level >= lvl:
-                    stack.pop()
-                node = Node(lvl, text, excluded=tracker.in_struct)
-                stack[-1].children.append(node)
-                stack.append(node)
-
-        manual = tracker.visit_markers(has_start, has_end)
-        if manual:
-            gross += words
-            buckets["manually marked"] += words
-            continue
-        if tracker.in_struct:
-            gross += words
-            buckets[tracker.struct_kind or "structural"] += words
-            continue
-        if kind == "p" and el in doc.fields["toc_paras"]:
-            gross += words
-            buckets["contents fields (TOC/page refs)"] += words
-            continue
-        if kind == "p" and el in doc.fields["page_paras"]:
-            gross += words
-            buckets["page-number fields"] += words
-            continue
-
-        gross += words
-        node = stack[-1]
-
-        if kind == "tbl":
-            ans = table_answers.get(i, "i")
-
-            if ans in ("d", "c"):
-                # The entire table is excluded.
-                buckets["tables (data/calculation only)"] += words
-            else:
-                # An included table counts as a whole.
-                # Do NOT remove numbers/symbols from it.
-                node.own_words += words
-
-            continue
-
-        # paragraph: subtract per-block exclusions, then numbers
-        excluded_here = 0
-        for key, (substr, bi) in visual_items.items():
-            if bi == i:
-                n_occ = count_occurrences(text, substr)
-                if n_occ:
-                    w = word_count(substr) * n_occ
-                    excluded_here += w
-                    buckets["visual elements"] += w
-        if i in figure_data_only:
-            inner = figure_data_only[i]
-            if inner and inner in text:
-                w = word_count(inner)
-                excluded_here += w
-                buckets["figure inner text (data only)"] += w
-        for key, (eq, bi) in equation_items.items():
-            if bi == i:
-                n_occ = count_occurrences(text, eq)
-                if n_occ:
-                    w = word_count(eq) * n_occ
-                    excluded_here += w
-                    buckets["equations/calculations"] += w
-        # citations: apply at every occurrence, whole response
-        text_for_numeric = text
-        for ct in citation_texts:
-            n_occ = count_occurrences(text, ct)
-            if n_occ:
-                w = word_count(ct) * n_occ
-                excluded_here += w
-                buckets["in-text citations"] += w
-                text_for_numeric = text_for_numeric.replace(ct, " ")
-        for key, (eq, bi) in equation_items.items():
-            if bi == i:
-                text_for_numeric = text_for_numeric.replace(eq, " ")
-        num = numeric_symbol_count(text)
-        buckets["numbers/symbols"] += num
-
-        counted_words = max(words - excluded_here - num, 0)
-
-        if args.profile == "psmt":
-            # Flag paragraphs that look mathematical but were not
-            # completely identified as equations/calculations.
-            math_chars = len(re.findall(
-                r"[0-9+\-×*/÷^=<>≤≥≈√²³⁴⁵⁶⁷⁸⁹]",
-                text
-            ))
-
-            if math_chars >= 3 and counted_words > 0:
-                psmt_unrecognised_math.append(
-                    (i, text.strip(), counted_words)
-                )
-
-        node.own_words += counted_words
-    # notes accounting
-    if args.profile == "psmt" and psmt_unrecognised_math:
-        emit_debug = out
-        emit_debug(
-            "\nPSMT diagnostic: mathematical-looking paragraphs that still "
-            "contributed counted words:"
-        )
-
-        for bi, txt, wc in psmt_unrecognised_math[:20]:
-            emit_debug(
-                f"  Block {bi}: +{wc} counted word(s): {txt[:180]}"
-            )
-
-        if len(psmt_unrecognised_math) > 20:
-            emit_debug(
-                f"  ... and {len(psmt_unrecognised_math) - 20} more."
-            )
-    gross += fn_words + en_words
-    buckets["footnotes (bibliographic)"] += fn_excluded
-    buckets["endnotes (bibliographic)"] += en_excluded
-    for t in fn_kept:
-        buckets["numbers/symbols"] += numeric_symbol_count(t)
-    for t in en_kept:
-        buckets["numbers/symbols"] += numeric_symbol_count(t)
-
-    # SmartArt prose the user said counts (text not in body gross)
-    added_words = 0
-    for w_add, label in figure_add:
-        if w_add:
-            gross += w_add
-            root.own_words += w_add
-            added_words += w_add
-
-    total_excluded = sum(buckets.values())
-    final_count = max(gross - total_excluded, 0)
-
-    # ---- report -------------------------------------------------------------
-    lines_out = []
-    def emit(s=""):
-        out(s)
-        lines_out.append(s)
-
-    emit("\n" + "=" * 52)
-    emit(c("QCAA WORD COUNT REPORT", "bold"))
-    emit(f"File: {os.path.basename(path)}   Profile: {args.profile}   Mode: {'interactive' if interactive else 'non-interactive'}")
-    emit("=" * 52)
-    emit(f"Gross countable words (incl. footnotes/endnotes): {gross}")
-    emit("Excluded:")
-    label_map = [
-        ("numbers/symbols", "Numbers/symbols"),
-        ("in-text citations", "In-text citations"),
-        ("equations/calculations", "Equations/calculations"),
-        ("visual elements", "Visual elements (captions/by-lines)"),
-        ("figure inner text (data only)", "Figure inner text (data-only figures)"),
-        ("tables (data/calculation only)", "Tables (data/calculation only)"),
-        ("footnotes (bibliographic)", "Bibliographic footnotes"),
-        ("endnotes (bibliographic)", "Bibliographic endnotes"),
-        ("title page", "Title page / front matter"),
-        ("contents", "Contents pages"),
-        ("abstract", "Abstract"),
-        ("bibliography", "Bibliography / reference list"),
-        ("appendix", "Appendixes"),
-        ("frontmatter", "Declarations (front matter)"),
-        ("contents fields (TOC/page refs)", "Contents fields (TOC/page refs)"),
-        ("page-number fields", "Page-number fields"),
-        ("manually marked", "Manually marked regions"),
-        ("structural", "Other structural sections"),
-    ]
-    for key, label in label_map:
-        if buckets.get(key):
-            emit(f"  {label + ':':<42}{buckets[key]}")
-    emit("-" * 52)
-    emit(c(f"ESTIMATED QCAA WORD COUNT: {final_count}", "green"))
-    emit("=" * 52)
-
-    if doc.app_props.get("Words"):
-        w = doc.app_props["Words"]
-        emit(f"\nReference: Word's own last-saved count = {w} words "
-             f"({doc.app_props.get('Pages', '?')} pages).")
-        naive = gross - buckets.get("title page", 0) - buckets.get("contents", 0) \
-            - buckets.get("bibliography", 0) - buckets.get("appendix", 0) \
-            - buckets.get("abstract", 0) - buckets.get("frontmatter", 0)
-        if abs(naive - w) > max(0.05 * w, 20):
-            emit(c(f"Note: this tool's gross figure ({naive}) differs from Word's ({w}) by "
-                   f"more than 5%. Common causes: tracked changes, text boxes Word includes, "
-                   f"or content in headers/footers.", "yellow"))
-    if doc.chart_parts:
-        emit(f"\nNote: {len(doc.chart_parts)} embedded chart part(s) detected "
-             f"({', '.join(os.path.basename(p) for p in doc.chart_parts)}). "
-             "Chart cached data is not words; judge the chart itself by eye.")
-
-    if root.children:
-        emit("\nBREAKDOWN BY HEADING (counted words only; excluded sections marked):")
-        print_tree(root, out=emit)
-        if root.own_words:
-            emit(f"\n(+ {root.own_words} counted word(s) not under any heading)")
-
-    auto_items = [a for a in decisions.data["auto"] if a.get("answer")]
-    if auto_items:
-        emit("\nAuto/default decisions this run (review with --review-auto if unsure):")
-        for a in auto_items[-12:]:
-            emit(f"  [{a['answer']}] {a['key'][:70]}  ({a['reason']})")
-        if len(auto_items) > 12:
-            emit(f"  ... and {len(auto_items) - 12} more")
-
-    emit("\nStill check by eye: text inside images, unusual citation styles, "
-         "whether appendix content is genuinely supplementary, and heavily "
-         "tracked-changed drafts (accept/reject first).")
-    emit(c(f"ESTIMATED QCAA WORD COUNT: {final_count}", "green"))
-
-    return {
-        "file": os.path.basename(path),
-        "final_count": final_count,
-        "gross": gross,
-        "excluded": dict(buckets),
-        "word_app_words": doc.app_props.get("Words"),
-        "word_app_pages": doc.app_props.get("Pages"),
-        "breakdown_tree": lines_out,
-    }
+    result = count_words(document)
+    print_report(document, result)
+    return 0
 
 
-# ----------------------------------------------------------------------------
-# CLI
-# ----------------------------------------------------------------------------
-
-def build_parser():
-    p = argparse.ArgumentParser(
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(
         prog="qcaa_word_count.py",
         description="Estimate the QCAA word count of a .docx response.",
-        formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog=__doc__,
+        add_help=True,
     )
-    p.add_argument("files", nargs="*", help=".docx file(s); omit to use the file picker")
-    p.add_argument("-p", "--profile", default="generic",
-                   choices=list(PROFILES.keys()),
-                   help="assessment-type profile (rules are identical; only defaults/guidance differ)")
-    p.add_argument("--list-profiles", action="store_true", help="show available profiles and exit")
-    p.add_argument("-n", "--non-interactive", action="store_true",
-                   help="never prompt; use defaults and list them for review")
-    p.add_argument(
-        "--review-auto",action="store_true",help="reserved for reviewing automatic exclusions (currently informational)")
-    p.add_argument("-d", "--decisions", help="decisions file to load/save (default: <file>.qcaa-decisions.json)")
-    p.add_argument("--no-save", action="store_true", help="do not write the decisions file")
-    p.add_argument("-r", "--report", help="also write the full report to this file")
-    p.add_argument("--json", action="store_true", help="print a machine-readable JSON summary")
-    p.add_argument("--explain", action="store_true", help="print the QCAA rules and exit")
-    p.add_argument("--no-color", action="store_true", help="disable coloured output")
-    return p
-
-
-def main(argv=None):
-    global USE_COLOR
-    args = build_parser().parse_args(argv)
-    if args.no_color:
-        USE_COLOR = False
+    parser.add_argument("file", nargs="?", help=".docx file (omit to use file picker)")
+    parser.add_argument("--explain", action="store_true",
+                        help="print the QCAA rules and exit")
+    args = parser.parse_args(argv)
 
     if args.explain:
-        print(QCAA_RULES)
-        return 0
-    if args.list_profiles:
-        print("Available profiles (QCAA rules are the same for all):")
-        for name, prof in PROFILES.items():
-            print(f"  {name:<20} {prof['description']}")
+        print(QCAA_RULES_TEXT)
         return 0
 
-    files = list(args.files)
-    if not files:
-        picked = get_path_via_dialog()
-        if picked:
-            files.append(picked)
-        else:
-            files.append(input("Path to your .docx file: ").strip().strip('"'))
+    if args.file:
+        path = args.file
+    else:
+        path = pick_file() or ""
+        if not path:
+            print("No file selected.")
+            return 1
 
-    profile = PROFILES[args.profile]
-    results = []
-    exit_code = 0
-
-    for path in files:
-        if not os.path.isfile(path):
-            print(f"\nCouldn't find a file at: {path}")
-            print("Check the path is correct and try again.")
-            exit_code = 2
-            continue
-        if not path.lower().endswith(".docx"):
-            print(f"\n'{path}' doesn't look like a .docx file.")
-            print("If it's a .doc, open it in Word and use File > Save As > Word Document (.docx) first.")
-            exit_code = 2
-            continue
-
-        dec_path = args.decisions or (path + ".qcaa-decisions.json")
-        decisions = Decisions(dec_path)
-
-        try:
-            result = analyse_file(path, args, profile, decisions)
-        except Exception as e:
-            print(f"\nCouldn't analyse '{path}': {e}")
-            exit_code = 1
-            continue
-
-        if not args.no_save and not args.non_interactive:
-            try:
-                decisions.data["decisions"] = decisions.data["decisions"]
-                with open(dec_path, "w", encoding="utf-8") as f:
-                    json.dump(decisions.data, f, indent=2, ensure_ascii=False)
-                print(f"\nDecisions saved to {dec_path} (re-run to skip answered questions).")
-            except Exception as e:
-                print(f"(Couldn't save decisions: {e})")
-
-        if args.report:
-            try:
-                with open(args.report, "a", encoding="utf-8") as f:
-                    f.write("\n".join(result["breakdown_tree"]) + "\n\n")
-            except Exception as e:
-                print(f"(Couldn't write report: {e})")
-
-        results.append(result)
-
-    if len(results) > 1 or args.json:
-        print("\nSUMMARY")
-        print("-" * 60)
-        print(f"{'File':<40}{'QCAA words':>12}")
-        for r in results:
-            print(f"{r['file']:<40}{r['final_count']:>12}")
-        if args.json:
-            print("\nJSON:")
-            print(json.dumps(results, indent=2, ensure_ascii=False))
-
-    return exit_code
+    return run(path)
 
 
 if __name__ == "__main__":
     sys.exit(main())
-'''
-with open('/mnt/agents/output/qcaa_word_count.py', 'w', encoding='utf-8') as f:
-    f.write(code)
-print("written", len(code), "chars")
-'''
