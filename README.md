@@ -14,6 +14,8 @@ included. This script automates the parts of that distinction that a computer
 *can* reliably make, and asks you a quick question for the parts that
 genuinely need a human judgement call.
 
+I've made sure to try to make it super user friendly, using rich text to add colours to make things a bit more fun!
+
 ## What it automates
 
 - Counts all body text: paragraphs, headings/subheadings, table text and
@@ -42,8 +44,7 @@ https://www.qcaa.qld.edu.au/senior/certificates-and-qualifications/qce-qcia-hand
 
 - Citations in a format the pattern-matcher doesn't recognise (it looks for
   `(Author, Year)` / `Author (Year)` shapes — numbered styles like `[1]`
-  aren't currently covered)
-- Equations/formulas mixed into running text
+  aren't currently covered) **I do not have plans currently to add support for styles OTHER THAN APA 7**
 - Text inside floating text boxes, or a table nested inside another table
   (both are edge cases python-docx doesn't expose directly)
 - Anything else — wrap it in plain-text markers anywhere in the document
@@ -89,45 +90,8 @@ The script will then interactively ask you about:
 what was excluded and why, and a per-heading breakdown of the final count.
 
 ## Example results
-```bash
-================================================
-QCAA WORD COUNT REPORT
-================================================
-Word total incl. footnotes/endnotes:   1255
-Excluded:
-  Numbers/symbols:                       75
-  Citations (fields + confirmed typed):  26
-  Equations/calculations:                0
-  Bibliographic footnotes:               0
-  Bibliographic endnotes:                0
-  Data-only tables:                      0
-  Data-only figure inner-text:           0
-  Visual elements (captions/by-lines):   0
-  Title page:                            13
-  Contents/Abstract/Bibliography/Appx:   64
-  Manually marked:                       0
-------------------------------------------------
-ESTIMATED QCAA WORD COUNT: 1154
-================================================
+<img width="1207" height="640" alt="image" src="https://github.com/user-attachments/assets/744134f9-e625-4f7f-a836-7414ad16b647" />
 
-PAGE ESTIMATE: ~2 page(s) (portrait, ~612 body words/page).
-Word's own pagination will differ based on fonts, tables,
-images, breaks, and heading spacing — check against Word's
-status bar before relying on this figure.
-
-BREAKDOWN BY HEADING (counted words only, excluded sections marked):
-- Rationale:: 235 words
-- Modifications:: 74 words
-- Risk Management:: 140 words
-- Results:: 39 words
-- (untitled heading): 0 words
-- Analysis of Data:: 258 words
-- Evaluation:: 325 words
-- Conclusion:: 83 words
-- References:: 0 words  [excluded from count]
-
-Still check by eye: text inside images, unusual citation styles, SmartArt labels, and any custom reference-manager field codes.
-```
 
 ## Disclaimer
 
@@ -142,3 +106,4 @@ and any citation style the pattern-matcher might not recognise.
 Issues and pull requests welcome — in particular around detecting
 additional citation styles, text box / nested table support, and page-count
 exclusions.
+Please ask any question or leave any comments in the **Discussions** section, I will do my best to answer them!
