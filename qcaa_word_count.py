@@ -24,9 +24,6 @@ WHAT THIS VERSION DOES
   - Prints a report with a table and citation breakdown
 
 WHAT IT DOES NOT DO YET
-  - Equations and calculations outside tables
-  - Math objects (OMML) inside paragraphs or table cells
-  - Footnotes / endnotes
   - Text boxes / SmartArt
   - Manual [[QCAA_EXCLUDE]] markers
   - Saved decisions between runs
@@ -442,6 +439,122 @@ def describe_confidence(conf: float) -> str:
     if conf >= 0.5:
         return "medium confidence"
     return "low confidence"
+
+
+# ============================================================================
+# SECTION 2.5 — COLOUR / OUTPUT HELPERS
+# ============================================================================
+# ANSI colour codes. On Windows, we try to enable VT processing; if we
+# can't, colours degrade gracefully to plain text.
+
+import os as _os
+import sys as _sys
+
+_COLOURS_ENABLED = True
+
+def _enable_windows_ansi() -> bool:
+    """Try to enable ANSI escape sequences on Windows 10+."""
+    if _os.name != "nt":
+        return True
+    try:
+        import ctypes
+        kernel32 = ctypes.windll.kernel32
+        # ENABLE_VIRTUAL_TERMINAL_PROCESSING = 0x0004
+        # STD_OUTPUT_HANDLE = -11
+        kernel32.SetConsoleMode(kernel32.GetStdHandle(-11), 7)
+        return True
+    except Exception:
+        return False
+
+
+if not _enable_windows_ansi():
+    _COLOURS_ENABLED = False
+
+# ANSI codes
+_RESET   = "\033[0m"
+_BOLD    = "\033[1m"
+_DIM     = "\033[2m"
+_RED     = "\033[31m"
+_GREEN   = "\033[32m"
+_YELLOW  = "\033[33m"
+_BLUE    = "\033[34m"
+_MAGENTA = "\033[35m"
+_CYAN    = "\033[36m"
+_GREY    = "\033[90m"
+_BG_RED     = "\033[41m"
+_BG_GREEN   = "\033[42m"
+
+
+def _c(text: str, *codes: str) -> str:
+    """Wrap text in ANSI colour codes, or return plain if colours disabled."""
+    if not _COLOURS_ENABLED:
+        return text
+    return "".join(codes) + text + _RESET
+
+
+def green(text: str) -> str:
+    return _c(text, _GREEN)
+
+
+def red(text: str) -> str:
+    return _c(text, _RED)
+
+
+def yellow(text: str) -> str:
+    return _c(text, _YELLOW)
+
+
+def cyan(text: str) -> str:
+    return _c(text, _CYAN)
+
+
+def grey(text: str) -> str:
+    return _c(text, _GREY)
+
+
+
+def bold(text: str) -> str:
+    return _c(text, _BOLD)
+
+
+def bold_green(text: str) -> str:
+    return _c(text, _BOLD, _GREEN)
+
+
+def bold_yellow(text: str) -> str:
+    return _c(text, _BOLD, _YELLOW)
+
+
+def count_colour(decision: Decision) -> str:
+    """Return the ANSI code appropriate for a decision."""
+    if decision == Decision.COUNT:
+        return _GREEN
+    if decision == Decision.EXCLUDE:
+        return _RED
+    if decision == Decision.FLAG:
+        return _YELLOW
+    if decision == Decision.UNDECIDED:
+        return _YELLOW
+    return ""
+
+def span_colour(span: Span) -> str:
+    """Return the ANSI colour code appropriate for a span's decision."""
+    dec = span.decision_record.decision
+    rule = span.decision_record.rule_id or ""
+
+    if dec == Decision.COUNT:
+        return _GREEN
+    if dec == Decision.EXCLUDE:
+        if rule == "I-CITATION":
+            return _MAGENTA
+        return _RED
+    if dec in (Decision.FLAG, Decision.UNDECIDED):
+        return _YELLOW
+    return ""
+
+
+def magenta(text: str) -> str:
+    return _c(text, _MAGENTA)
 # ============================================================================
 # SECTION 3 — INGEST
 # ============================================================================
@@ -1038,14 +1151,23 @@ def find_missed_candidates(document: Document) -> list[str]:
 # SECTION 5d — CAPTION / VISUAL ELEMENT DETECTION
 # ============================================================================
 
-QCAA_CAPTION_HELP = """
-------------------------------------------------------------------
-CAPTIONS AND VISUAL ELEMENTS (QCAA rule)
-------------------------------------------------------------------
+QCAA_CAPTION_HELP = f"""
+{grey('------------------------------------------------------------------')}
+{cyan(bold('CAPTIONS AND VISUAL ELEMENTS (QCAA rule)'))}
+{grey('------------------------------------------------------------------')}
 QCAA excludes "visual elements associated with the written response"
 -- by-lines, banners, captions and call-outs that are the visual
 elements of written genres suitable for print or online publication
 (literary article, blog, essay, column).
+
+{grey('Examples that should be excluded (red):')}
+  - {red('"Figure 3: Reaction rate vs. temperature"')}
+  - {red('"By Jane Smith, 12 March 2024"')}
+  - {red('"Source: QCAA (2023)"')}
+
+{grey('Examples that should NOT be excluded (green):')}
+  - {green('"Figure 3 shows the relationship between temperature and rate"')}
+  - {green('A sentence in the body that names a figure inline')}
 
 HOWEVER: in science reports and PSMTs, captions and figure labels
 often identify variables, conditions, or what a graph shows. Markers
@@ -1053,7 +1175,6 @@ generally treat those as information, and they count.
 
 When unsure, ask your teacher. The safest default is to exclude,
 because that is what QCAA's rule says on its face.
-------------------------------------------------------------------
 """
 
 
@@ -1109,8 +1230,8 @@ def resolve_captions_interactive(document: Document,
             continue
 
         print()
-        print("-" * 60)
-        print(f"Caption {i} of {len(caption_blocks)}")
+        print(grey("-" * 60))
+        print(cyan(bold(f"Caption {i} of {len(caption_blocks)}")))
         snippet = block.text.strip()
         if len(snippet) > 120:
             snippet = snippet[:117] + "..."
@@ -1356,45 +1477,71 @@ def resolve_footnotes_interactive(document: Document,
 # SECTION 6 — INTERACTIVE FLAG RESOLUTION
 # ============================================================================
 
-QCAA_TABLE_HELP = """
-------------------------------------------------------------------
-TABLES (QCAA rule)
-------------------------------------------------------------------
-  Option 1 — Count the whole table.
+QCAA_TABLE_HELP = f"""
+{grey('------------------------------------------------------------------')}
+{cyan(bold('TABLES (QCAA rule)'))}
+{grey('------------------------------------------------------------------')}
+  Option 1 — {green('Count the whole table.')}
              Use this when the table contains information other
              than raw or processed data: prose in cells, explanatory
              labels beyond column headers, annotations, etc.
 
-  Option 2 — Exclude the whole table.
+             {grey('Example')}
+               | {green('Modifications')}                  | {green('Type')}       | {green('Justification')}     |
+               | {green('Changed focus from acid to temp')} | {green('Redirection')}  | {green('Identified in rationale.')} |
+
+  Option 2 — {red('Exclude the whole table.')}
              Use this for tables that contain only raw data
              (individual measurements), processed data (means,
              totals, percentages), or calculation working.
 
-  Option 3 — Count the header row only, exclude the data rows.
+             {grey('Example')}
+               | {green('Temperature')} | {red('Trial 1 (s)')} | {red('Trial 2 (s)')} | {red('Mean (s)')} |
+               | {green('10°C')}         | {red('275')}         | {red('91')}          | {red('159')}     |
+
+  Option 3 — {yellow('Count the header row only, exclude the data rows.')}
              A middle-ground reading: the column labels
-             ("Temperature", "Trial 1 (s)") count as information,
+             ('Temperature', 'Trial 1 (s)') count as information,
              but the data does not.
 
   Option 4 — Show this message again.
-------------------------------------------------------------------
 """
 
 
 def preview_table(table: Table, max_rows: int = 4, max_width: int = 70) -> str:
+    """Render a small text preview of the table for the prompt.
+
+    Cells are coloured: green if the answer is 'count_all', red if
+    'exclude_all', mixed based on the header row if 'headers_only'.
+    """
+    answer = table.answer  # may be None at prompt time
+
     lines = []
     for r_idx, row in enumerate(table.rows):
         if r_idx >= max_rows:
-            lines.append(f"... ({len(table.rows) - max_rows} more row(s))")
+            lines.append(grey(f"... ({len(table.rows) - max_rows} more row(s))"))
             break
         cells = []
         for cell in row:
             t = cell.text.strip().replace("\n", " ")
             if len(t) > 20:
                 t = t[:17] + "..."
-            cells.append(t)
-        line = " | ".join(cells)
-        if len(line) > max_width:
-            line = line[:max_width - 3] + "..."
+            # Colour the cell based on what the tool would do
+            if answer == "count_all":
+                coloured = green(t)
+            elif answer == "exclude_all":
+                coloured = red(t)
+            elif answer == "headers_only":
+                if r_idx == table.header_row_index:
+                    coloured = green(t)
+                else:
+                    coloured = red(t)
+            else:
+                # No answer yet — use light default colouring by cell position
+                # so the preview shows *potential* grouping
+                coloured = t
+            cells.append(coloured)
+        line = f" {grey('|')} ".join(cells)
         lines.append(line)
     return "\n".join(lines)
 
@@ -1402,20 +1549,24 @@ def preview_table(table: Table, max_rows: int = 4, max_width: int = 70) -> str:
 def _menu(question: str, options: list[tuple[str, str]],
           default_key: Optional[str] = None) -> str:
     print()
-    print(question)
+    print(cyan(bold(question)))
     for i, (key, label) in enumerate(options, start=1):
-        marker = " (suggested)" if key == default_key else ""
-        print(f"  [{i}] {label}{marker}")
+        if key == default_key:
+            marker = " " + bold_yellow("(suggested)")
+        else:
+            marker = ""
+        num = yellow(f"[{i}]")
+        print(f"  {num} {label}{marker}")
 
     while True:
         default_hint = ""
         if default_key is not None:
             for i, (key, _) in enumerate(options, start=1):
                 if key == default_key:
-                    default_hint = f" [{i}]"
+                    default_hint = f" {yellow('[' + str(i) + ']')}"
                     break
         try:
-            raw = input(f"\nYour choice{default_hint}: ").strip()
+            raw = input(f"\n{bold('Your choice')}{default_hint}: ").strip()
         except EOFError:
             raw = ""
 
@@ -1423,15 +1574,14 @@ def _menu(question: str, options: list[tuple[str, str]],
             return default_key
 
         if not raw.isdigit():
-            print("Please type a number.")
+            print(red("Please type a number."))
             continue
 
         idx = int(raw) - 1
         if 0 <= idx < len(options):
             return options[idx][0]
 
-        print(f"Please type a number between 1 and {len(options)}.")
-
+        print(red(f"Please type a number between 1 and {len(options)}."))
 
 def resolve_flags_interactive(document: Document) -> None:
     auto_accept_remaining = False
@@ -1473,12 +1623,12 @@ def resolve_flags_interactive(document: Document) -> None:
             continue
 
         print()
-        print("-" * 60)
-        print(f"Appendix region detected ({len(region_blocks)} block(s))")
+        print(grey("-" * 60))
+        print(cyan(bold(f"Appendix region detected ({len(region_blocks)} block(s))")))
         snippet = first_block.text[:80]
         if len(first_block.text) > 80:
             snippet += "..."
-        print(f'Starts at: "{snippet}"')
+        print(f'Starts at: {grey(snippet)}')
         print()
         print("Appendixes are only excluded if they contain supplementary")
         print("material that is NOT used as evidence when marking.")
@@ -1553,15 +1703,14 @@ def resolve_flags_interactive(document: Document) -> None:
                 continue
 
             print()
-            print("-" * 60)
-            print(f"Table {i} of {len(document.tables)}")
-            print(f"Suggested: {describe_suggestion(table)} "
-                  f"({describe_confidence(table.suggestion_confidence)})")
+            print(grey("-" * 60))
+            print(cyan(bold(f"Table {i} of {len(document.tables)}")))
+            print(f"Suggested: {green(describe_suggestion(table))} "
+                  f"({grey(describe_confidence(table.suggestion_confidence))})")
             print()
             print(preview_table(table))
             print()
-            print(f"  {table.word_count} word(s) in this table.")
-
+            print(f"  {bold(str(table.word_count))} word(s) in this table.")
             default_key = None
             if table_has_strong_default(table):
                 default_key = suggest_table_answer(table).value
@@ -1619,29 +1768,28 @@ def resolve_flags_interactive(document: Document) -> None:
 
 def _resolve_citations_interactive(document: Document) -> None:
     print()
-    print("=" * 60)
-    print("Citation detection")
-    print("=" * 60)
+    print(grey("=" * 60))
+    print(cyan(bold("Citation detection")))
+    print(grey("=" * 60))
     print()
-    print("Note: this tool can only detect APA 7 style citations with good")
-    print("accuracy. Other styles (MLA, Chicago, Harvard, numbered, etc.)")
-    print("may not be detected correctly. Check the report at the end.")
+    print(grey("Note: this tool can only detect APA 7 style citations with good"))
+    print(grey("accuracy. Other styles (MLA, Chicago, Harvard, numbered, etc.)"))
+    print(grey("may not be detected correctly. Check the report at the end."))
     print()
 
     auto_citations = [c for c in document.citations if c.source == "auto"]
 
     if auto_citations:
-        print(f"Found {len(auto_citations)} in-text citation(s):")
+        print(f"Found {bold_green(str(len(auto_citations)))} in-text citation(s):")
         print()
         for i, c in enumerate(auto_citations, start=1):
-            occ = "" if c.occurrences == 1 else f"  (×{c.occurrences})"
-            print(f"  {i:>3}. {c.text}{occ}")
+            occ = "" if c.occurrences == 1 else f"  {grey('(×' + str(c.occurrences) + ')')}"
+            print(f"  {yellow(str(i)):>3}. {magenta(c.text)}{occ}")
         print()
         print("These will be excluded from the word count.")
     else:
-        print("No APA 7 in-text citations detected.")
+        print(grey("No APA 7 in-text citations detected."))
     print()
-
     apply_citation_exclusions(document)
 
     # -- Candidates the detector didn't auto-exclude -----------------------
@@ -1953,21 +2101,36 @@ def count_words(document: Document) -> dict:
 def print_report(document: Document, result: dict) -> None:
     print()
     print("=" * 60)
-    print("QCAA WORD COUNT REPORT")
+    print(bold("QCAA WORD COUNT REPORT"))
     print(f"File: {document.filename}")
     print("=" * 60)
     print()
-    print(f"  FINAL WORD COUNT: {result['total']}")
+    print(f"  {bold_green('FINAL WORD COUNT:')} {bold_green(str(result['total']))}")
     print()
 
     if result["buckets"]:
-        print("Excluded / flagged (not counted):")
+        print(bold("Excluded / flagged (not counted):"))
         for key in sorted(result["buckets"]):
-            print(f"  {key:<40} {result['buckets'][key]:>5} word(s)")
+            # Colour-code the bucket categories
+            if key.startswith("region:"):
+                col = grey
+            elif key.startswith("excluded:I-CITATION"):
+                col = red
+            elif key.startswith("excluded:I-EQUATION"):
+                col = red
+            elif key.startswith("excluded:I-NUMBER"):
+                col = red
+            elif key.startswith("excluded:I-SYMBOL"):
+                col = red
+            elif key.startswith("flagged:"):
+                col = yellow
+            else:
+                col = red
+            print(f"  {col(key):<40} {result['buckets'][key]:>5} word(s)")
         print()
 
     if result.get("tables"):
-        print("Tables:")
+        print(bold("Tables:"))
         for t in result["tables"]:
             answer_label = {
                 "count_all": "counted whole",
@@ -1975,54 +2138,155 @@ def print_report(document: Document, result: dict) -> None:
                 "headers_only": "headers only",
                 "unresolved": "unresolved",
             }.get(t["answer"], t["answer"])
-            print(f"  Table {t['index']}: "
-                  f"suggested={t['suggestion']:<12} "
-                  f"chosen={answer_label:<15} "
-                  f"counted={t['counted']:<4} "
-                  f"excluded={t['excluded']}")
+            # Colour by answer
+            if t["answer"] == "count_all":
+                line = green(
+                    f"  Table {t['index']}: suggested={t['suggestion']:<12} "
+                    f"chosen={answer_label:<15} "
+                    f"counted={t['counted']:<4} excluded={t['excluded']}"
+                )
+            elif t["answer"] in ("exclude_all", "headers_only"):
+                line = red(
+                    f"  Table {t['index']}: suggested={t['suggestion']:<12} "
+                    f"chosen={answer_label:<15} "
+                    f"counted={t['counted']:<4} excluded={t['excluded']}"
+                )
+            else:
+                line = yellow(
+                    f"  Table {t['index']}: suggested={t['suggestion']:<12} "
+                    f"chosen={answer_label:<15} "
+                    f"counted={t['counted']:<4} excluded={t['excluded']}"
+                )
+            print(line)
         print()
-        
-        
 
     cit = result.get("citations", {})
     if cit.get("auto") or cit.get("manual"):
-        print("In-text citations:")
+        print(bold("In-text citations:"))
         if cit["auto"]:
-            print(f"  Auto-detected (APA 7 patterns):   {cit['auto']:>4} "
-                  f"({cit['auto_words']} words)")
+            print(green(f"  Auto-detected (APA 7 patterns):   {cit['auto']:>4} "
+                       f"({cit['auto_words']} words)"))
         if cit["manual"]:
-            print(f"  Manually added by user:           {cit['manual']:>4} "
-                  f"({cit['manual_words']} words)")
+            print(green(f"  Manually added by user:           {cit['manual']:>4} "
+                       f"({cit['manual_words']} words)"))
         print()
 
     fn = result.get("footnotes", {})
     if fn.get("counted") or fn.get("excluded"):
-        print("Footnotes / endnotes:")
+        print(bold("Footnotes / endnotes:"))
         if fn["counted"]:
-            print(f"  Counted (commentary):             {fn['counted']:>4} "
-                  f"({fn['counted_words']} words)")
+            print(green(f"  Counted (commentary):             {fn['counted']:>4} "
+                       f"({fn['counted_words']} words)"))
         if fn["excluded"]:
-            print(f"  Excluded (bibliographic):         {fn['excluded']:>4} "
-                  f"({fn['excluded_words']} words)")
+            print(red(f"  Excluded (bibliographic):         {fn['excluded']:>4} "
+                     f"({fn['excluded_words']} words)"))
         print()
 
     if result.get("math_objects"):
-        print(f"Math objects (OMML):              {result['math_objects']:>4} "
-              f"(excluded, not counted)")
+        print(red(f"Math objects (OMML):              {result['math_objects']:>4} "
+                 f"(excluded, not counted)"))
         print()
 
-    print("Note: Citation detection uses APA 7 patterns. If your citations")
-    print("use a different style (MLA, Chicago, Harvard, numbered, etc.),")
-    print("they may be counted as ordinary words. Review the report and use")
-    print("the manual citation entry if any were missed.")
+    print(grey("Note: Citation detection uses APA 7 patterns. If your citations"))
+    print(grey("use a different style (MLA, Chicago, Harvard, numbered, etc.),"))
+    print(grey("they may be counted as ordinary words. Review the report and use"))
+    print(grey("the manual citation entry if any were missed."))
     print()
-    print("This version does not yet handle:")
-    print("  - Equations outside tables or math objects (typed as plain text)")
-    print("  - Text boxes and SmartArt")
-    print("  - Manual [[QCAA_EXCLUDE]] markers")
+    print(grey("Still to come:"))
+    print(grey("  - Saved decisions (so re-runs skip already-answered prompts)"))
+    print(grey("  - Manual [[QCAA_EXCLUDE]] markers for user-defined exclusions"))
+    print(grey("  - SmartArt text extraction"))
+    print()
+    
+    
+def print_coloured_preview(document: Document) -> None:
+    """Print a colour-coded preview of the whole document.
+
+    - Green = counted
+    - Red = excluded by a rule
+    - Yellow = flagged for review (should be resolved by now)
+    - Cyan = headings
+    - Grey = region-excluded content (title page, references, etc.)
+    """
+    print()
+    print("=" * 78)
+    print(bold("COLOUR-CODED PREVIEW"))
+    print(grey("Green = counted  |  Magenta = citation  |  Red = other excluded"))
+    print(grey("Grey = region-excluded  |  Cyan = heading"))    
+    print("=" * 78)
     print()
 
+    if not _COLOURS_ENABLED:
+        print(grey("(Colours disabled — this terminal doesn't support ANSI escape codes.)"))
+        print()
+        return
 
+    for block in document.blocks:
+        # Skip entirely empty blocks
+        if not block.spans:
+            continue
+
+        # Headings always shown in cyan
+        if block.block_type == BlockType.HEADING:
+            print()
+            print(cyan(bold(block.text.strip())))
+            continue
+
+        # Region-excluded blocks: dim grey
+        if block.region_record.decision == Decision.EXCLUDE:
+            print(grey(block.text.strip()))
+            continue
+
+        # Otherwise, print each span in its decision's colour
+        line_parts: list[str] = []
+        for span in block.spans:
+            dec = span.decision_record.decision
+            rule = span.decision_record.rule_id or ""
+            tok = span.text
+            if dec == Decision.COUNT:
+                line_parts.append(green(tok))
+            elif dec == Decision.EXCLUDE:
+                if rule == "I-CITATION":
+                    line_parts.append(magenta(tok))
+                else:
+                    line_parts.append(red(tok))
+            elif dec in (Decision.FLAG, Decision.UNDECIDED):
+                line_parts.append(yellow(tok))
+            else:
+                line_parts.append(tok)
+
+    # Tables
+    if document.tables:
+        print()
+        print(bold(cyan("--- TABLES ---")))
+        for t in document.tables:
+            print()
+            answer = t.answer.value if t.answer else "unresolved"
+            print(cyan(bold(f"Table {t.table_index + 1} — {answer}")))
+            for row in t.rows:
+                row_parts: list[str] = []
+                for cell in row:
+                    cell_parts: list[str] = []
+                    for span in cell.spans:
+                        dec = span.decision_record.decision
+                        rule = span.decision_record.rule_id or ""
+                        tok = span.text
+                        if dec == Decision.COUNT:
+                            cell_parts.append(green(tok))
+                        elif dec == Decision.EXCLUDE:
+                            if rule == "I-CITATION":
+                                cell_parts.append(magenta(tok))
+                            else:
+                                cell_parts.append(red(tok))
+                        else:
+                            cell_parts.append(tok)
+                    row_parts.append(" ".join(cell_parts))
+                print(" | ".join(row_parts))
+
+    print()
+    print("=" * 78)
+    
+    
 # ============================================================================
 # SECTION 9 — FILE PICKER
 # ============================================================================
@@ -2107,7 +2371,18 @@ def run(path: str) -> int:
     if not path.lower().endswith(".docx"):
         print(f"'{path}' doesn't look like a .docx file.")
         return 2
-    
+
+    # Print the colour legend once at startup so users know the scheme
+    print()
+    print(grey("Colour guide:"))
+    print(f"  {green('green')}   = counted toward the total")
+    print(f"  {red('red')}     = excluded (numbers, symbols, equations)")
+    print(f"  {magenta('magenta')} = excluded (citations)")
+    print(f"  {grey('grey')}    = excluded region (title page, appendix, references)")
+    print(f"  {yellow('yellow')}  = flagged for your review")
+    print(f"  {cyan('cyan')}    = headings and section titles")
+    print()
+
     print(f"Loading: {path}")
     document = ingest(path)
     print(f"  Found {len(document.blocks)} paragraph(s)")
@@ -2115,13 +2390,15 @@ def run(path: str) -> int:
     math_total = sum(b.math_object_count for b in document.blocks)
     if math_total:
         print(f"  Found {math_total} math object(s) (equation editor)")
-        for table in document.tables:
-            table.suggestion, table.suggestion_confidence = classify_table(table)
 
+    # Classify all tables regardless of whether math objects exist
+    for table in document.tables:
+        table.suggestion, table.suggestion_confidence = classify_table(table)
+        
+        
     detect_regions(document)
     apply_regional_decisions(document)
     classify_and_decide_spans(document)
-
     # Caption detection (before interactive resolution so flags are ready)
     detect_captions(document)
 
@@ -2136,7 +2413,9 @@ def run(path: str) -> int:
     resolve_flags_interactive(document)
 
     result = count_words(document)
+    print_coloured_preview(document)
     print_report(document, result)
+
     return 0
 
 
