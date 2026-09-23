@@ -639,7 +639,6 @@ SECTION_TRIGGERS = {
     "annex": "appendix",
 }
 
-
 def detect_regions(document: Document) -> None:
     first_heading_idx = None
     for block in document.blocks:
@@ -671,7 +670,79 @@ def detect_regions(document: Document) -> None:
         else:
             block.region = current_region
 
+    # NEW: detect trailing reference entries that have no heading above them
+    _detect_trailing_references(document)
 
+
+# Regex patterns for reference-shaped text
+_APA_AUTHOR_START_RE = re.compile(
+    r"^\s*[A-Z][A-Za-z'’\-]+(?:\s*,\s*[A-Z]\.?)+\s*\(\s*(?:19|20)\d{2}[a-z]?\s*\)",
+)
+_URL_LIKE_RE = re.compile(
+    r"(?:https?://|www\.|<https?://|doi\.org/|doi:\s*10\.)"
+    r"|\.(?:org|com|edu|gov|net|ac\.uk|edu\.au)\b",
+    re.IGNORECASE,
+)
+
+
+def _looks_like_reference(text: str) -> bool:
+    """True if a paragraph looks like a reference entry.
+
+    Signals (any one is enough):
+      - Starts with APA-author format (Surname, Initial. (Year))
+      - Contains a URL or DOI-like string
+      - Contains a year in parentheses AND a domain-like suffix
+    """
+    text = text.strip()
+    if not text:
+        return False
+
+    if _APA_AUTHOR_START_RE.match(text):
+        return True
+
+    if _URL_LIKE_RE.search(text):
+        return True
+
+    if re.search(r"\(\s*(?:19|20)\d{2}[a-z]?\s*\)", text) and \
+       re.search(r"\b\w+\.(?:org|com|edu|gov|net|au|uk)\b", text, re.IGNORECASE):
+        return True
+
+    return False
+
+
+def _detect_trailing_references(document: Document) -> None:
+    """Mark trailing paragraphs that look like reference entries as
+    Region.REFERENCES, even without a 'References' heading above them.
+
+    Only looks at the last 20 paragraphs. Requires either 2+ reference-shaped
+    paragraphs or a single one with a URL — this avoids flagging a body
+    paragraph that happens to mention a year in parentheses.
+    """
+    body_blocks = [b for b in document.blocks if b.region == Region.BODY]
+    if not body_blocks:
+        return
+
+    look_back = body_blocks[-20:]
+
+    marked: list[Block] = []
+    for block in look_back:
+        text = block.text.strip()
+        if not text:
+            continue
+        if block.block_type == BlockType.HEADING:
+            continue
+        if _looks_like_reference(text):
+            marked.append(block)
+
+    if not marked:
+        return
+
+    has_url = any(_URL_LIKE_RE.search(b.text) for b in marked)
+    if len(marked) < 2 and not has_url:
+        return
+
+    for block in marked:
+        block.region = Region.REFERENCES
 # ============================================================================
 # SECTION 5 — DECISIONS (paragraphs)
 # ============================================================================
@@ -2014,6 +2085,7 @@ def _classify_span_in_place(span: Span, reason_prefix: str = "") -> None:
 # ============================================================================
 def count_words(document: Document) -> dict:
     buckets: dict[str, int] = defaultdict(int)
+    bucket_samples: dict[str, list[str]] = defaultdict(list)
     total = 0
     table_summary: list[dict] = []
     citation_summary = {"auto": 0, "auto_words": 0,
@@ -2035,7 +2107,10 @@ def count_words(document: Document) -> dict:
                 total += 1
             else:
                 rule = span.decision_record.rule_id or "unknown"
-                buckets[f"excluded:{rule}"] += 1
+                key = f"excluded:{rule}"
+                buckets[key] += 1
+                if len(bucket_samples[key]) < 5:
+                    bucket_samples[key].append(span.text)
 
     for table in document.tables:
         counted = 0
@@ -2059,6 +2134,7 @@ def count_words(document: Document) -> dict:
         })
         if excluded:
             buckets[f"table:{answer_label}"] += excluded
+
     # --- Footnotes / endnotes ---
     footnote_summary = {"counted": 0, "counted_words": 0,
                         "excluded": 0, "excluded_words": 0}
@@ -2072,8 +2148,7 @@ def count_words(document: Document) -> dict:
             buckets["footnotes (bibliographic)"] += fn.word_count
             footnote_summary["excluded"] += 1
             footnote_summary["excluded_words"] += fn.word_count
-    
-    
+
     for block in document.blocks:
         if block.region_record.decision == Decision.EXCLUDE:
             continue
@@ -2089,11 +2164,11 @@ def count_words(document: Document) -> dict:
     return {
         "total": total,
         "buckets": dict(buckets),
+        "bucket_samples": dict(bucket_samples),
         "tables": table_summary,
         "citations": citation_summary,
         "math_objects": total_math_objects,
     }
-
 # ============================================================================
 # SECTION 8 — REPORT
 # ============================================================================
@@ -2110,6 +2185,7 @@ def print_report(document: Document, result: dict) -> None:
 
     if result["buckets"]:
         print(bold("Excluded / flagged (not counted):"))
+        samples = result.get("bucket_samples", {})
         for key in sorted(result["buckets"]):
             # Colour-code the bucket categories
             if key.startswith("region:"):
@@ -2126,7 +2202,14 @@ def print_report(document: Document, result: dict) -> None:
                 col = yellow
             else:
                 col = red
-            print(f"  {col(key):<40} {result['buckets'][key]:>5} word(s)")
+            count = result["buckets"][key]
+            sample_str = ""
+            if samples.get(key):
+                parts = [f'"{t}"' for t in samples[key]]
+                if count > len(samples[key]):
+                    parts.append("...")
+                sample_str = "  " + grey("(" + ", ".join(parts) + ")")
+            print(f"  {col(key):<40} {count:>5} word(s){sample_str}")
         print()
 
     if result.get("tables"):
@@ -2371,7 +2454,14 @@ def run(path: str) -> int:
     if not path.lower().endswith(".docx"):
         print(f"'{path}' doesn't look like a .docx file.")
         return 2
-
+    # Clear the screen at startup for a cleaner first impression.
+    # Uses ANSI "erase screen" on modern terminals; falls back to a
+    # blank line if that's not available.
+    if _COLOURS_ENABLED:
+        print("\033[2J\033[H", end="")
+    else:
+        print()
+        
     # Print the colour legend once at startup so users know the scheme
     print()
     print(grey("Colour guide:"))
