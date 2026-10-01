@@ -48,11 +48,8 @@ https://www.qcaa.qld.edu.au/senior/certificates-and-qualifications/qce-qcia-hand
 - Text inside floating text boxes, or a table nested inside another table
   (both are edge cases python-docx doesn't expose directly)
 
-Struct-based exclusion (Contents/References/etc.) relies on the section
-titles actually using Word's **Heading 1/2/3...** paragraph styles. If a
-document was drafted in Google Docs and pasted into Word without reapplying
-heading styles, none of that structural detection will fire — apply real
-heading styles first.
+- Struct-based exclusion (Contents/References/etc.) relies on the section titles **actually** using Word's **Heading 1/2/3...** paragraph styles. If a
+document was drafted in Google Docs and pasted into Word without reapplying heading styles, **none of that structural detection will fire — apply real heading styles first.**
 
 ## Installation
 
