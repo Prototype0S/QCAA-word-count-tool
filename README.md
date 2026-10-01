@@ -47,14 +47,6 @@ https://www.qcaa.qld.edu.au/senior/certificates-and-qualifications/qce-qcia-hand
   aren't currently covered) **I do not have plans currently to add support for styles OTHER THAN APA 7**
 - Text inside floating text boxes, or a table nested inside another table
   (both are edge cases python-docx doesn't expose directly)
-- Anything else — wrap it in plain-text markers anywhere in the document
-  and the script will exclude it:
-
-  ```
-  [[QCAA_EXCLUDE_START]]  ... content to ignore ...  [[QCAA_EXCLUDE_END]]
-  ```
-
-  (e.g. wrap a title page or a blank-page placeholder in these)
 
 Struct-based exclusion (Contents/References/etc.) relies on the section
 titles actually using Word's **Heading 1/2/3...** paragraph styles. If a
