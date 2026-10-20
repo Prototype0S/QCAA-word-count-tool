@@ -9,7 +9,7 @@ from .citations import (
 from .model import (
     Citation, Decision, DecisionRecord, Document, Region, TableAnswer,
 )
-from .output import bold, bold_cyan, cyan, dim, green, grey, magenta, red, yellow
+from .output import bold, cyan, dim, green, grey, magenta, red, yellow
 from .tables import apply_table_answer, suggest_table_answer, table_has_strong_default
 
 
@@ -25,13 +25,47 @@ QCAA_TABLE_HELP = f"""
 {grey('equations inside cells are still excluded by the span-level rules.')}
 """
 
+QCAA_CAPTION_CAVEAT = f"""
+{grey('=' * 66)}
+{yellow(bold('HEADS UP: CAPTIONS ARE A CARVE-OUT'))}
+{grey('=' * 66)}
+
+The general rule is {green('"a word is a word"')} - if it's a word, it counts.
+
+But QCAA explicitly excludes {red('visual elements')}:
+by-lines, banners, captions and call-outs. Captions are the one place
+where the general rule doesn't apply cleanly.
+
+{grey('Common cases:')}
+  {red('"Figure 1: Reaction rate vs. temperature"')}
+      -> caption - excluded by QCAA
+
+  {green('"Figure 1 shows the relationship between temperature and rate."')}
+      -> body text - counted
+
+{grey('But:')} in science reports and PSMTs, captions often identify
+variables, conditions, or what a graph shows. Some markers count these
+as information. If your school treats captions that way, override the
+default - press {yellow('[1]')} to count.
+
+{grey('When in doubt, ask your teacher.')}
+{grey('=' * 66)}
+"""
+
 QCAA_CAPTION_HELP = f"""
 {grey('-' * 66)}
-{cyan(bold('CAPTIONS AND VISUAL ELEMENTS (QCAA rule)'))}
+{cyan(bold('CAPTIONS - quick reminder'))}
 {grey('-' * 66)}
-QCAA excludes captions and other visual elements of written genres.
-But in science reports and PSMTs, captions often identify variables
-and count. When in doubt, ask your teacher.
+Captions are a carve-out from "a word is a word": QCAA excludes
+{red('visual elements')} including captions. But some markers count
+captions that identify variables or conditions.
+
+  {green('Count')}   - if the caption carries information
+  {red('Exclude')} - if it's a pure label
+
+Full explanation and examples were printed before the first caption
+prompt. {grey('When in doubt, ask your teacher.')}
+{grey('-' * 66)}
 """
 
 
@@ -111,7 +145,7 @@ def resolve_appendixes(document: Document, auto_accept: bool) -> bool:
         print(green("  Appendix(es) auto-counted."))
         return True
 
-    _panel(f"Appendix region detected",
+    _panel("Appendix region detected",
            f"{len(appendix_blocks)} block(s)")
     print(f'  Starts at: {grey(appendix_blocks[0].text[:80])}')
     choice = _menu(
@@ -275,6 +309,8 @@ def resolve_captions(document: Document, auto_accept: bool) -> bool:
         return True
 
     _panel(f"{len(caption_blocks)} caption/visual element(s) detected.")
+    print(QCAA_CAPTION_CAVEAT)
+
     for i, block in enumerate(caption_blocks, start=1):
         if block.region_record.decision in (Decision.COUNT, Decision.EXCLUDE):
             continue
@@ -284,23 +320,23 @@ def resolve_captions(document: Document, auto_accept: bool) -> bool:
         choice = _menu(
             "How should this caption be counted?",
             [
-                ("exclude", f"{red('Exclude')} it (QCAA's default)"),
-                ("count",   f"{green('Count')} it (names variables or carries information)"),
+                ("count",   f"{green('Count')} it (a word is a word - overrides the default)"),
+                ("exclude", f"{red('Exclude')} it (QCAA treats captions as visual elements)"),
                 ("help",    "Explain the QCAA rule for captions"),
                 ("all",     "Accept suggestions for all remaining captions"),
             ],
-            default_key="exclude",
+            default_key="count",
         )
         if choice == "help":
             print(QCAA_CAPTION_HELP)
             choice = _menu(
                 "How should this caption be counted?",
                 [
-                    ("exclude", "Exclude it"),
                     ("count",   "Count it"),
+                    ("exclude", "Exclude it"),
                     ("all",     "Accept suggestions for all remaining captions"),
                 ],
-                default_key="exclude",
+                default_key="count",
             )
         if choice == "all":
             auto_accept = True
