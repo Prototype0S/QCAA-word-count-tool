@@ -15,6 +15,8 @@ included. This script automates the parts of that distinction that a computer
 genuinely need a human judgement call.
 
 I've made sure to try to make it super user friendly, using rich text to add colours to make things a bit more fun!
+> **Power users**: see [ADVANCED.md](./ADVANCED.md) for terminal usage,
+> flag reference, and workflows.
 
 ## What it automates
 

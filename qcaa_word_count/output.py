@@ -384,6 +384,11 @@ h1 {{ font-size:1.7rem; margin:0 0 .25rem 0; }}
   font-size:.75rem; padding:.15rem .5rem; border-radius:999px;
   font-weight:600; letter-spacing:.02em;
 }}
+.mismatch-banner {{
+  background: var(--yellow-bg); border: 1px solid var(--yellow);
+  border-radius: 6px; padding: .6rem 1rem; margin-bottom: 1rem;
+  color: var(--yellow); font-weight: 500; font-size: .95rem;
+}}
 .badge-good {{ background:var(--green-bg); color:var(--green); }}
 .badge-bad  {{ background:var(--red-bg); color:var(--red); }}
 .badge-info {{ background:var(--cyan-bg); color:var(--cyan); }}
@@ -538,7 +543,7 @@ summary {{ cursor:pointer; color:var(--cyan); font-weight:500; }}
 <span class="region-ex">region-excluded</span>
 <span class="heading">heading</span>
 </div>
-
+{banner_html}
 <div class="panel">
   <h2><span class="badge badge-good">FINAL WORD COUNT</span></h2>
   <div class="final-count">{total}<small>words</small></div>
@@ -844,6 +849,27 @@ def _build_summary_text(document: Document, result: dict) -> str:
         lines.append(
             f"Citations excluded: {cit.get('auto', 0) + cit.get('manual', 0)}"
         )
+
+    stats = compute_statistics(document, result)
+    sections = stats.get("sections", [])
+    if sections:
+        total_counted = result["total"] or 1
+        lines.append("")
+        lines.append("Words per section:")
+        longest = max(len(s["heading"]) for s in sections)
+        longest = min(longest, 40)
+        for s in sections:
+            heading = s["heading"]
+            if len(heading) > longest:
+                heading = heading[: longest - 1] + "…"
+            pct = (s["words"] / total_counted) * 100
+            tables_note = (
+                f"  ({s['tables']} table(s))" if s["tables"] else ""
+            )
+            lines.append(
+                f"  {heading:<{longest}}  {s['words']:>5}  ({pct:>5.1f}%){tables_note}"
+            )
+
     if result["buckets"]:
         lines.append("")
         lines.append("Excluded:")
@@ -862,6 +888,18 @@ def build_html_preview(document: Document, result: dict) -> str:
     body_html = "\n".join(body) or "<p><em>(No content)</em></p>"
 
     stats_rows = []
+        # Stated count mismatch banner
+    banner_html = ""
+    stated = result.get("stated_count")
+    if stated and stated != result["total"]:
+        delta = result["total"] - stated
+        banner_html = (
+            f'<div class="mismatch-banner">'
+            f'⚠ Title page says "Word Count: {stated}" · '
+            f'Tool calculates <strong>{result["total"]}</strong> '
+            f'(differs by {abs(delta)})'
+            f'</div>'
+        )
     for key, count in sorted(result["buckets"].items()):
         stats_rows.append(
             f'<dt>{html.escape(key)}</dt><dd>{count} word(s)</dd>'
@@ -925,9 +963,24 @@ def build_html_preview(document: Document, result: dict) -> str:
 
     summary_text = _build_summary_text(document, result)
 
+    # Stated-count mismatch banner
+    banner_html = ""
+    stated = result.get("stated_count")
+    if stated and stated != result["total"]:
+        delta = result["total"] - stated
+        banner_html = (
+            f'<div class="mismatch-banner">'
+            f'⚠ Title page says "Word Count: {stated}" &middot; '
+            f'Tool calculates <strong>{result["total"]}</strong> '
+            f'(differs by {abs(delta)})'
+            f'</div>'
+        )
+        
+        
     return _HTML_TEMPLATE.format(
         filename=html.escape(document.filename or ""),
         total=result["total"],
+        banner_html=banner_html,
         stats_rows="".join(stats_rows),
         statistics_html=statistics_html,
         body_html=body_html,

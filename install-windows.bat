@@ -9,7 +9,7 @@ echo   QCAA WORD COUNT TOOL
 echo ============================================================
 echo.
 
-REM --- Warn if running from a temporary or synced folder -------------
+REM --- Warn if running from Downloads or a temporary folder ---------
 echo %~dp0 | findstr /i /c:"\\Downloads\\" /c:"\\Temp\\" >nul
 if %errorlevel% equ 0 (
     echo NOTE: You are running the tool from Downloads or Temp.
@@ -32,7 +32,6 @@ if %errorlevel% neq 0 (
     exit /b 1
 )
 
-REM --- Check Python version is >= 3.10 -------------------------------
 for /f "tokens=2 delims= " %%v in ('python --version 2^>^&1') do set PYVER=%%v
 echo Found Python %PYVER%
 python -c "import sys; sys.exit(0 if sys.version_info >= (3,10) else 1)" >nul 2>nul
@@ -62,6 +61,9 @@ if errorlevel 1 (
     ".venv\Scripts\python.exe" -m pip install --quiet python-docx
     if errorlevel 1 (
         echo ERROR: Could not install python-docx.
+        echo.
+        echo If you are on a school network, PyPI might be blocked.
+        echo Try from a home network or a phone hotspot.
         pause
         exit /b 1
     )
@@ -70,7 +72,18 @@ if errorlevel 1 (
 REM --- Run the tool --------------------------------------------------
 echo Starting...
 echo.
-".venv\Scripts\python.exe" qcaa_word_count.py
+echo If the tool asks for a file, a file picker will open.
+echo Navigate to your .docx file and click Open.
+echo.
+echo The HTML preview will open in your browser.
+echo This window stays open until you press a key at the end.
+echo.
+
+if not "%~1"=="" (
+    ".venv\Scripts\python.exe" qcaa_word_count.py "%~1"
+) else (
+    ".venv\Scripts\python.exe" qcaa_word_count.py
+)
 if errorlevel 1 (
     echo.
     echo The tool exited with an error. See the message above.

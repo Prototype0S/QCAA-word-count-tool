@@ -90,4 +90,5 @@ def count_words(document: Document) -> dict:
         "footnotes": footnote_summary,
         "math_objects": total_math_objects,
         "unresolved_footnotes": unresolved_footnotes,
+        "stated_count": None,   # filled in by pipeline.extract_stated_count    
     }

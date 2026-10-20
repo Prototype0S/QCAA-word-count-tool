@@ -9,8 +9,10 @@ from .citations import (
 from .model import (
     Citation, Decision, DecisionRecord, Document, Region, TableAnswer,
 )
-from .output import bold, cyan, dim, green, grey, magenta, red, yellow
-from .tables import apply_table_answer, suggest_table_answer, table_has_strong_default
+from .output import bold, cyan, green, grey, magenta, red, yellow
+from .tables import (
+    apply_table_answer, suggest_table_answer, table_has_strong_default,
+)
 
 
 QCAA_TABLE_HELP = f"""
@@ -99,7 +101,6 @@ def _menu(question: str, options: list[tuple[str, str]],
 
 
 def _panel(title: str, subtitle: str = "") -> None:
-    """Print a coloured panel header."""
     print()
     print(grey("-" * 66))
     line = cyan(bold(title))
@@ -220,6 +221,12 @@ def resolve_tables(document: Document, auto_accept: bool) -> bool:
     if auto_accept:
         for table in document.tables:
             if table.answer is not None:
+                # Already decided (e.g. restored from saved state).
+                # Re-apply so spans reflect the decision.
+                apply_table_answer(
+                    table, table.answer,
+                    reason="Reapplied saved decision",
+                )
                 continue
             table.answer = TableAnswer.COUNT_ALL
             apply_table_answer(
@@ -232,6 +239,11 @@ def resolve_tables(document: Document, auto_accept: bool) -> bool:
     _panel(f"{len(document.tables)} table(s) found.")
     for i, table in enumerate(document.tables, start=1):
         if table.answer is not None:
+            # Already decided (restored) — re-apply just in case.
+            apply_table_answer(
+                table, table.answer,
+                reason="Reapplied saved decision",
+            )
             continue
 
         print()
