@@ -6,6 +6,7 @@ import html
 import io
 import json
 import os
+import re
 import webbrowser
 from pathlib import Path
 
@@ -36,7 +37,7 @@ def _enable_windows_ansi() -> bool:
 if not _enable_windows_ansi():
     _COLOURS_ENABLED = False
 
-_R = "\033[0m"; _B = "\033[1m"
+_R = "\033[0m"; _B = "\033[1m"; _DIM = "\033[2m"
 _GRN = "\033[32m"; _RED = "\033[31m"; _YEL = "\033[33m"
 _CYN = "\033[36m"; _MAG = "\033[35m"; _GRY = "\033[90m"
 
@@ -52,7 +53,9 @@ def cyan(t):    return _c(t, _CYN)
 def grey(t):    return _c(t, _GRY)
 def magenta(t): return _c(t, _MAG)
 def bold(t):    return _c(t, _B)
+def dim(t):     return _c(t, _DIM)
 def bold_green(t): return _c(t, _B, _GRN)
+def bold_cyan(t):  return _c(t, _B, _CYN)
 
 
 def span_to_ansi(span: Span) -> str:
@@ -67,6 +70,10 @@ def span_to_ansi(span: Span) -> str:
     return span.text
 
 
+# ---------------------------------------------------------------------------
+# Interleaved iteration
+# ---------------------------------------------------------------------------
+
 def _interleaved_items(document):
     items = []
     for b in document.blocks:
@@ -77,6 +84,10 @@ def _interleaved_items(document):
     for _, _, kind, obj in items:
         yield kind, obj
 
+
+# ---------------------------------------------------------------------------
+# ANSI preview
+# ---------------------------------------------------------------------------
 
 def print_ansi_preview(document: Document) -> None:
     print("=" * 78)
@@ -113,66 +124,8 @@ def print_ansi_preview(document: Document) -> None:
     print("=" * 78)
 
 
-def build_html_preview(document: Document, result: dict) -> str:
-    body = []
-    for kind, obj in _interleaved_items(document):
-        if kind == "block":
-            body.append(_block_html(obj))
-        else:
-            body.append(_table_html(obj))
-    body_html = "\n".join(body) or "<p><em>(No content)</em></p>"
-
-    stats_rows = []
-    for key, count in sorted(result["buckets"].items()):
-        stats_rows.append(f"<dt>{html.escape(key)}</dt><dd>{count} word(s)</dd>")
-    if result.get("math_objects"):
-        stats_rows.append(
-            f"<dt>Math objects</dt><dd>{result['math_objects']} (excluded)</dd>"
-        )
-    if document.drawings:
-        stats_rows.append(
-            f"<dt>Drawings</dt><dd>{document.drawings} "
-            f"({document.drawings_with_text} contain text)</dd>"
-        )
-    if document.text_boxes:
-        stats_rows.append(f"<dt>Text boxes</dt><dd>{len(document.text_boxes)}</dd>")
-
-    additional = ""
-    if result.get("tables"):
-        rows = []
-        for t in result["tables"]:
-            rows.append(
-                f"<tr><td>Table {t['index']}</td><td>{html.escape(t['suggestion'])}</td>"
-                f"<td>{html.escape(t['answer'])}</td>"
-                f"<td>{t['counted']}</td><td>{t['excluded']}</td></tr>"
-            )
-        additional += (
-            "<div class='panel'><h2>Tables</h2><table>"
-            "<tr><th>#</th><th>Suggestion</th><th>Chosen</th>"
-            "<th>Counted</th><th>Excluded</th></tr>"
-            + "".join(rows) + "</table></div>"
-        )
-
-    cit = result.get("citations", {})
-    if cit.get("auto") or cit.get("manual"):
-        additional += (
-            f"<div class='panel'><h2>Citations</h2>"
-            f"<p>Auto-detected (APA 7): <strong>{cit.get('auto', 0)}</strong> "
-            f"({cit.get('auto_words', 0)} words)<br>"
-            f"Manually added: <strong>{cit.get('manual', 0)}</strong> "
-            f"({cit.get('manual_words', 0)} words)</p></div>"
-        )
-
-    return _HTML_TEMPLATE.format(
-        filename=html.escape(document.filename or ""),
-        total=result["total"],
-        stats_rows="".join(stats_rows),
-        body_html=body_html,
-        additional_panels=additional,
-    )
-
 # ---------------------------------------------------------------------------
-# Plain report
+# Plain-text report
 # ---------------------------------------------------------------------------
 
 def print_report(document: Document, result: dict) -> None:
@@ -264,7 +217,91 @@ def print_report(document: Document, result: dict) -> None:
 
 
 # ---------------------------------------------------------------------------
-# HTML preview
+# Statistics
+# ---------------------------------------------------------------------------
+
+def compute_statistics(document: Document, result: dict) -> dict:
+    sections: list[dict] = []
+    current = {"heading": "(start of document)", "words": 0, "tables": 0}
+
+    counted_by_index: dict[int, int] = {}
+    for block in document.blocks:
+        counted_by_index[block.block_index] = sum(
+            1 for s in block.spans
+            if s.decision_record.decision == Decision.COUNT
+        )
+
+    table_words_by_position: dict[int, int] = {}
+    for table in document.tables:
+        n = sum(
+            1 for cell in table.iter_cells() for s in cell.spans
+            if s.decision_record.decision == Decision.COUNT
+        )
+        table_words_by_position[table.block_index] = (
+            table_words_by_position.get(table.block_index, 0) + n
+        )
+
+    for kind, obj in _interleaved_items(document):
+        if kind == "block":
+            block = obj
+            if block.block_type == BlockType.HEADING:
+                if current["words"] or current["tables"] or current["heading"] != "(start of document)":
+                    sections.append(current)
+                current = {
+                    "heading": block.text.strip() or "(untitled)",
+                    "words": counted_by_index.get(block.block_index, 0),
+                    "tables": 0,
+                }
+            else:
+                current["words"] += counted_by_index.get(block.block_index, 0)
+        else:
+            table = obj
+            current["words"] += table_words_by_position.get(table.block_index, 0)
+            current["tables"] += 1
+
+    if current["words"] or current["tables"] or current["heading"] != "(start of document)":
+        sections.append(current)
+
+    sections = [s for s in sections if s["words"] or s["tables"]]
+
+    counted_words: list[str] = []
+    for block in document.blocks:
+        if block.region_record.decision != Decision.COUNT:
+            continue
+        for span in block.spans:
+            if span.decision_record.decision == Decision.COUNT:
+                counted_words.append(span.text)
+
+    alpha_words = [w.strip(".,;:!?()[]{}\"'").lower() for w in counted_words]
+    alpha_words = [w for w in alpha_words if w and any(c.isalpha() for c in w)]
+    unique = len(set(alpha_words))
+    total_alpha = len(alpha_words)
+    richness = (unique / total_alpha * 100) if total_alpha else 0.0
+
+    longest_block = None
+    longest_count = 0
+    for block in document.blocks:
+        n = counted_by_index.get(block.block_index, 0)
+        if n > longest_count:
+            longest_count = n
+            longest_block = block
+
+    return {
+        "sections": sections,
+        "unique_words": unique,
+        "total_alpha_words": total_alpha,
+        "richness_pct": richness,
+        "longest_paragraph_words": longest_count,
+        "longest_paragraph_preview": (
+            longest_block.text.strip()[:120] + "…"
+            if longest_block and len(longest_block.text.strip()) > 120
+            else (longest_block.text.strip() if longest_block else "")
+        ),
+    }
+
+
+# ---------------------------------------------------------------------------
+# HTML preview — fully coloured, with interactivity
 # ---------------------------------------------------------------------------
 
 _HTML_TEMPLATE = """<!DOCTYPE html>
@@ -272,89 +309,352 @@ _HTML_TEMPLATE = """<!DOCTYPE html>
 <title>QCAA word count preview — {filename}</title>
 <style>
 :root {{
-  --green:#1a7f37; --red:#cf222e; --magenta:#8250df; --yellow:#9a6700;
-  --grey:#6e7781; --cyan:#0969da; --bg:#ffffff; --card:#f6f8fa;
-  --border:#d0d7de;
+  --green:#1a7f37; --green-bg:#e8f5ec;
+  --red:#cf222e; --red-bg:#fdeeee;
+  --magenta:#8250df; --magenta-bg:#f3eefc;
+  --yellow:#9a6700; --yellow-bg:#fff8e5;
+  --grey:#6e7781; --grey-bg:#f0f2f4;
+  --cyan:#0969da; --cyan-bg:#eaf2fd;
+  --bg:#ffffff; --card:#f6f8fa;
+  --border:#d0d7de; --text:#1f2328;
+  --shadow: 0 1px 3px rgba(0,0,0,.06);
 }}
+body.dark {{
+  --green:#4ade80; --green-bg:#12321e;
+  --red:#f87171; --red-bg:#3a1414;
+  --magenta:#c084fc; --magenta-bg:#2a1845;
+  --yellow:#fbbf24; --yellow-bg:#3a2d0a;
+  --grey:#9ca3af; --grey-bg:#1f2227;
+  --cyan:#60a5fa; --cyan-bg:#0c1e3a;
+  --bg:#0d1117; --card:#161b22;
+  --border:#30363d; --text:#e6edf3;
+  --shadow: 0 1px 3px rgba(0,0,0,.4);
+}}
+* {{ box-sizing: border-box; }}
 body {{
-  font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
-  max-width:1100px; margin:2rem auto; padding:0 1.5rem;
-  color:#1f2328; line-height:1.6;
+  font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,
+              Helvetica,Arial,sans-serif;
+  max-width:1280px; margin:2rem auto; padding:0 1.5rem;
+  color:var(--text); line-height:1.6; background:var(--bg);
+  transition: background .2s, color .2s;
 }}
-h1 {{ font-size:1.6rem; margin-bottom:.25rem; }}
-.subtitle {{ color:var(--grey); margin-bottom:1.5rem; }}
-.legend {{ display:flex; flex-wrap:wrap; gap:.75rem; margin-bottom:1.5rem; font-size:.9rem; }}
-.legend span {{ display:inline-flex; align-items:center; gap:.4rem;
-  padding:.2rem .5rem; border-radius:4px; background:var(--card);
-  border:1px solid var(--border); }}
-.swatch {{ display:inline-block; width:12px; height:12px; border-radius:2px; }}
-.panel {{ background:var(--card); border:1px solid var(--border);
-  border-radius:6px; padding:1rem 1.25rem; margin-bottom:1.5rem; }}
-.panel h2 {{ font-size:1.1rem; margin:0 0 .5rem 0; }}
-.doc-body {{ font-family:"Source Serif Pro",Georgia,"Times New Roman",serif;
-  font-size:1.05rem; white-space:pre-wrap; word-wrap:break-word; }}
-.doc-body p {{ margin:0 0 .6rem 0; }}
-.doc-body .heading {{ color:var(--cyan); font-weight:600; font-size:1.15rem;
-  margin-top:1.2rem; }}
-.doc-body .heading.h1 {{ font-size:1.4rem; }}
-.doc-body .heading.h2 {{ font-size:1.2rem; }}
-.count {{ color:var(--green); }}
-.exclude {{ color:var(--red); text-decoration:line-through;
-  text-decoration-color:rgba(207,34,46,.4); }}
-.citation {{ color:var(--magenta); text-decoration:line-through;
-  text-decoration-color:rgba(130,80,223,.4); }}
-.flag {{ color:var(--yellow); background:rgba(154,103,0,.1);
-  border-bottom:1px dashed var(--yellow); }}
-.region-ex {{ color:var(--grey); font-style:italic; }}
-.unit {{ color:var(--green); border-bottom:1px dotted var(--green); }}
-table {{ border-collapse:collapse; margin:.5rem 0 1rem 0; width:100%; font-size:.95rem; }}
-td, th {{ border:1px solid var(--border); padding:.35rem .6rem;
-  vertical-align:top; white-space:pre-wrap; }}
-th {{ background:var(--card); text-align:left; }}
+h1 {{ font-size:1.7rem; margin:0 0 .25rem 0; }}
+.subtitle {{ color:var(--grey); margin-bottom:1.5rem; font-size:.95rem; }}
+
+.toolbar {{
+  display:flex; flex-wrap:wrap; gap:.5rem;
+  margin-bottom:1.5rem;
+}}
+.toolbar button {{
+  background:var(--card); border:1px solid var(--border);
+  color:var(--text); font-family:inherit; font-size:.85rem;
+  padding:.4rem .85rem; border-radius:6px; cursor:pointer;
+  transition: background .15s;
+}}
+.toolbar button:hover {{ background:var(--cyan-bg); border-color:var(--cyan); color:var(--cyan); }}
+.toolbar button.copied {{ background:var(--green-bg); border-color:var(--green); color:var(--green); }}
+
+.legend {{
+  display:flex; flex-wrap:wrap; gap:.5rem; margin-bottom:1.5rem;
+  font-size:.85rem;
+}}
+.legend span {{
+  display:inline-flex; align-items:center; gap:.4rem;
+  padding:.25rem .6rem; border-radius:999px;
+  background:var(--card); border:1px solid var(--border);
+  font-weight:500;
+}}
+.legend .count {{ background:var(--green-bg); border-color:var(--green); color:var(--green); }}
+.legend .exclude {{ background:var(--red-bg); border-color:var(--red); color:var(--red); }}
+.legend .citation {{ background:var(--magenta-bg); border-color:var(--magenta); color:var(--magenta); }}
+.legend .flag {{ background:var(--yellow-bg); border-color:var(--yellow); color:var(--yellow); }}
+.legend .region-ex {{ background:var(--grey-bg); border-color:var(--grey); color:var(--grey); }}
+.legend .heading {{ background:var(--cyan-bg); border-color:var(--cyan); color:var(--cyan); }}
+
+.panel {{
+  background:var(--card); border:1px solid var(--border);
+  border-radius:8px; padding:1.25rem 1.5rem; margin-bottom:1.5rem;
+  box-shadow:var(--shadow);
+}}
+.panel h2 {{
+  font-size:1.15rem; margin:0 0 .75rem 0;
+  display:flex; align-items:baseline; gap:.75rem;
+}}
+.panel h2 .badge {{
+  font-size:.75rem; padding:.15rem .5rem; border-radius:999px;
+  font-weight:600; letter-spacing:.02em;
+}}
+.badge-good {{ background:var(--green-bg); color:var(--green); }}
+.badge-bad  {{ background:var(--red-bg); color:var(--red); }}
+.badge-info {{ background:var(--cyan-bg); color:var(--cyan); }}
+.badge-warn {{ background:var(--yellow-bg); color:var(--yellow); }}
+
+.doc-body {{
+  font-family:"Source Serif Pro",Georgia,"Times New Roman",serif;
+  font-size:1.05rem; word-wrap:break-word;
+}}
+.doc-body p {{ margin:0 0 .7rem 0; }}
+.doc-body .heading {{
+  color:var(--cyan); font-weight:700; font-size:1.18rem;
+  margin:1.4rem 0 .5rem 0;
+  padding-left:.5rem; border-left:4px solid var(--cyan);
+}}
+.doc-body .heading.h1 {{ font-size:1.5rem; }}
+.doc-body .heading.h2 {{ font-size:1.28rem; }}
+.doc-body .heading.h3 {{ font-size:1.16rem; }}
+
+.count     {{ color:var(--green); cursor:pointer; }}
+.exclude   {{ color:var(--red); cursor:pointer;
+             text-decoration:line-through;
+             text-decoration-color:rgba(207,34,46,.35);
+             background:var(--red-bg); border-radius:2px; padding:0 1px; }}
+.citation  {{ color:var(--magenta); cursor:pointer;
+             text-decoration:line-through;
+             text-decoration-color:rgba(130,80,223,.35);
+             background:var(--magenta-bg); border-radius:2px; padding:0 1px; }}
+.flag      {{ color:var(--yellow); cursor:pointer;
+             background:var(--yellow-bg);
+             border-bottom:1px dashed var(--yellow); }}
+.region-ex {{ color:var(--grey); font-style:italic;
+             background:var(--grey-bg); padding:2px 4px; border-radius:2px; }}
+.unit      {{ color:var(--green); border-bottom:1px dotted var(--green); cursor:pointer; }}
+
+.count:hover, .exclude:hover, .citation:hover, .flag:hover, .unit:hover {{
+  outline:2px solid currentColor; outline-offset:1px; border-radius:2px;
+}}
+
+table {{ border-collapse:collapse; margin:.75rem 0 1.25rem 0;
+        width:100%; font-size:.92rem; }}
+td, th {{ border:1px solid var(--border); padding:.45rem .7rem;
+         vertical-align:top; white-space:pre-wrap; }}
+th {{ background:var(--cyan-bg); color:var(--cyan); text-align:left; }}
+tr:nth-child(even) td {{ background:var(--card); }}
+
+.caption {{
+  color:var(--grey); font-size:.85rem; font-style:italic;
+  margin:.15rem 0 .75rem 0;
+}}
+
 .stats-grid {{ display:grid; grid-template-columns:max-content 1fr;
-  gap:.25rem 1rem; font-size:.95rem; }}
-.stats-grid dt {{ color:var(--grey); }}
+              gap:.35rem 1rem; font-size:.95rem; }}
+.stats-grid dt {{ color:var(--red); font-weight:500; }}
 .stats-grid dd {{ margin:0; }}
-details {{ margin-top:.5rem; }}
-summary {{ cursor:pointer; color:var(--cyan); }}
-.final-count {{ font-size:2rem; font-weight:600; color:var(--green);
-  margin:.25rem 0 1rem 0; }}
+.stats-grid dt.total-row {{ color:var(--green); font-weight:700; }}
+.stats-grid dd.total-row {{ color:var(--green); font-weight:700; font-size:1.1rem; }}
+
+details {{ margin-top:.75rem; }}
+summary {{ cursor:pointer; color:var(--cyan); font-weight:500; }}
+.final-count {{
+  font-size:2.6rem; font-weight:700; color:var(--green);
+  margin:0 0 .5rem 0; line-height:1;
+}}
+.final-count small {{ font-size:.9rem; color:var(--grey);
+  font-weight:400; margin-left:.5rem; }}
+
+.table-chosen-count {{ color:var(--green); font-weight:600; }}
+.table-chosen-exclude {{ color:var(--red); font-weight:600; }}
+
+.stat-cards {{
+  display:grid; grid-template-columns:repeat(auto-fit, minmax(170px, 1fr));
+  gap:.75rem; margin-bottom:1rem;
+}}
+.stat-card {{
+  background:var(--bg); border:1px solid var(--border);
+  border-radius:6px; padding:.75rem 1rem;
+}}
+.stat-card .label {{
+  font-size:.72rem; text-transform:uppercase; letter-spacing:.05em;
+  color:var(--grey); font-weight:600;
+}}
+.stat-card .value {{
+  font-size:1.5rem; font-weight:700; color:var(--cyan); line-height:1.2;
+}}
+.stat-card .sub {{
+  font-size:.8rem; color:var(--grey); margin-top:.15rem;
+}}
+
+.section-bar {{
+  display:flex; height:24px; border-radius:4px; overflow:hidden;
+  background:var(--grey-bg); margin-bottom:1rem;
+}}
+.section-bar > div {{
+  height:100%; display:flex; align-items:center; justify-content:center;
+  color:#fff; font-size:.7rem; font-weight:600; white-space:nowrap;
+  overflow:hidden;
+}}
+
+.section-list {{ list-style:none; padding:0; margin:0; }}
+.section-list li {{
+  display:flex; justify-content:space-between;
+  padding:.35rem .5rem; border-bottom:1px solid var(--border);
+  font-size:.9rem;
+}}
+.section-list li:last-child {{ border-bottom:none; }}
+.section-list .name {{ color:var(--text); }}
+.section-list .count {{ color:var(--green); font-weight:600; }}
+.section-list .pct {{ color:var(--grey); font-size:.8rem; margin-left:.4rem; }}
+
+.span-tooltip {{
+  position:absolute; z-index:1000;
+  background:var(--card); border:1px solid var(--border);
+  border-radius:8px; padding:.85rem 1rem;
+  box-shadow:0 4px 12px rgba(0,0,0,.25);
+  max-width:340px; font-size:.85rem;
+  display:none;
+}}
+.span-tooltip.visible {{ display:block; }}
+.span-tooltip .st-text {{
+  font-weight:600; margin-bottom:.4rem;
+  padding:.25rem .4rem; border-radius:3px;
+  word-break:break-all;
+}}
+.span-tooltip .st-row {{
+  display:grid; grid-template-columns:max-content 1fr;
+  gap:.15rem .75rem; margin-top:.35rem;
+}}
+.span-tooltip .st-row dt {{ color:var(--grey); font-weight:500; }}
+.span-tooltip .st-row dd {{ margin:0; word-break:break-word; }}
+.span-tooltip .st-close {{
+  float:right; cursor:pointer; color:var(--grey);
+  font-size:1.1rem; line-height:1; padding:0 .25rem;
+}}
+.span-tooltip .st-close:hover {{ color:var(--red); }}
 </style></head><body>
 
 <h1>QCAA word count preview</h1>
-<div class="subtitle">{filename}</div>
+<div class="subtitle">{filename} — generated by qcaa_word_count.py v5</div>
+
+<div class="toolbar">
+  <button id="theme-btn" type="button">🌙 Dark mode</button>
+  <button id="copy-btn" type="button">📋 Copy summary</button>
+  <button type="button" onclick="window.print()">🖨️ Print / Save PDF</button>
+</div>
 
 <div class="legend">
-<span><span class="swatch" style="background:var(--green)"></span>counted</span>
-<span><span class="swatch" style="background:var(--red)"></span>excluded</span>
-<span><span class="swatch" style="background:var(--magenta)"></span>citation</span>
-<span><span class="swatch" style="background:var(--yellow)"></span>flagged</span>
-<span><span class="swatch" style="background:var(--grey)"></span>region-excluded</span>
-<span><span class="swatch" style="background:var(--cyan)"></span>heading</span>
+<span class="count">counted</span>
+<span class="exclude">excluded</span>
+<span class="citation">citation</span>
+<span class="flag">flagged</span>
+<span class="region-ex">region-excluded</span>
+<span class="heading">heading</span>
 </div>
 
 <div class="panel">
-<h2>Final word count</h2>
-<div class="final-count">{total}</div>
-<dl class="stats-grid">{stats_rows}</dl>
+  <h2><span class="badge badge-good">FINAL WORD COUNT</span></h2>
+  <div class="final-count">{total}<small>words</small></div>
+  <dl class="stats-grid">{stats_rows}</dl>
 </div>
 
 <div class="panel">
-<h2>Document with decisions applied</h2>
-<div class="doc-body">{body_html}</div>
+  <h2>Statistics <span class="badge badge-info">writing breakdown</span></h2>
+  {statistics_html}
+</div>
+
+<div class="panel">
+  <h2>Document <span class="badge badge-info">colour-coded preview</span></h2>
+  <div class="doc-body">{body_html}</div>
 </div>
 
 {additional_panels}
 
 <details>
-<summary>Notes</summary>
+<summary>Notes on how this was produced</summary>
 <p>Green text counts. Red text was excluded (numbers, symbols,
 equations). Magenta text was excluded as a citation. Yellow text was
 flagged and left undecided. Grey text is from an excluded region.
 Cyan text is a heading.</p>
-<p>Citation detection is APA 7 only. Other styles may be counted as
-ordinary words.</p>
+<p><strong>Click any coloured word</strong> to see the rule that was
+applied to it.</p>
+<p><strong>Citation detection is APA 7 only.</strong> Other styles may
+be counted as ordinary words. Use <code>python qcaa_word_count.py "your_file_name.docx" --report json</code> to audit
+every decision.</p>
 </details>
+
+<div class="span-tooltip" id="tooltip">
+  <span class="st-close" onclick="hideTooltip()">×</span>
+  <div class="st-text" id="tooltip-text"></div>
+  <dl class="st-row">
+    <dt>Decision</dt><dd id="tooltip-decision"></dd>
+    <dt>Rule</dt><dd id="tooltip-rule"></dd>
+    <dt>Reason</dt><dd id="tooltip-reason"></dd>
+  </dl>
+</div>
+
+<script>
+(function() {{
+  const themeBtn = document.getElementById('theme-btn');
+  const saved = localStorage.getItem('qcaa-theme');
+  if (saved === 'dark') {{
+    document.body.classList.add('dark');
+    themeBtn.textContent = '☀️ Light mode';
+  }}
+  themeBtn.addEventListener('click', () => {{
+    const dark = document.body.classList.toggle('dark');
+    themeBtn.textContent = dark ? '☀️ Light mode' : '🌙 Dark mode';
+    localStorage.setItem('qcaa-theme', dark ? 'dark' : 'light');
+  }});
+
+  const copyBtn = document.getElementById('copy-btn');
+  const summary = {summary_json};
+  copyBtn.addEventListener('click', async () => {{
+    try {{
+      await navigator.clipboard.writeText(summary);
+      copyBtn.textContent = '✅ Copied!';
+      copyBtn.classList.add('copied');
+      setTimeout(() => {{
+        copyBtn.textContent = '📋 Copy summary';
+        copyBtn.classList.remove('copied');
+      }}, 1500);
+    }} catch (e) {{
+      copyBtn.textContent = '❌ Copy failed';
+    }}
+  }});
+
+  const tooltip = document.getElementById('tooltip');
+  const tooltipText = document.getElementById('tooltip-text');
+  const tooltipDecision = document.getElementById('tooltip-decision');
+  const tooltipRule = document.getElementById('tooltip-rule');
+  const tooltipReason = document.getElementById('tooltip-reason');
+
+  document.addEventListener('click', (e) => {{
+    const t = e.target;
+    if (!t.matches || !t.matches('span.count, span.exclude, span.citation, span.flag, span.unit')) {{
+      return;
+    }}
+    if (!t.hasAttribute('data-rule')) return;
+
+    tooltipText.textContent = '"' + t.textContent + '"';
+    tooltipDecision.textContent = t.getAttribute('data-decision') || '(none)';
+    tooltipRule.textContent = t.getAttribute('data-rule') || '(none)';
+    tooltipReason.textContent = t.getAttribute('data-reason') || '(none)';
+    tooltipText.className = 'st-text ' + t.className.split(' ')[0];
+
+    const rect = t.getBoundingClientRect();
+    const top = window.scrollY + rect.bottom + 6;
+    const left = Math.min(
+      window.scrollX + rect.left,
+      window.scrollX + window.innerWidth - 360
+    );
+    tooltip.style.top = top + 'px';
+    tooltip.style.left = left + 'px';
+    tooltip.classList.add('visible');
+    e.stopPropagation();
+  }});
+
+  document.addEventListener('click', (e) => {{
+    if (!tooltip.contains(e.target)) {{
+      tooltip.classList.remove('visible');
+    }}
+  }}, true);
+
+  window.hideTooltip = function() {{
+    tooltip.classList.remove('visible');
+  }};
+  document.addEventListener('keydown', (e) => {{
+    if (e.key === 'Escape') hideTooltip();
+  }});
+}})();
+</script>
 
 </body></html>
 """
@@ -364,16 +664,23 @@ def _span_html(span: Span) -> str:
     text = html.escape(span.text)
     dec = span.decision_record.decision
     rule = span.decision_record.rule_id or ""
+    reason = span.decision_record.reason or ""
+    dec_attr = html.escape(dec.value if hasattr(dec, "value") else str(dec))
+    rule_attr = html.escape(rule)
+    reason_attr = html.escape(reason)
+    meta = (f' data-decision="{dec_attr}" data-rule="{rule_attr}" '
+            f'data-reason="{reason_attr}"')
+
     if dec == Decision.COUNT:
         if span.span_type == SpanType.UNIT:
-            return f'<span class="unit" title="unit (counted)">{text}</span>'
-        return f'<span class="count" title="counted">{text}</span>'
+            return f'<span class="unit"{meta}>{text}</span>'
+        return f'<span class="count"{meta}>{text}</span>'
     if dec == Decision.EXCLUDE:
         if rule == "I-CITATION":
-            return f'<span class="citation" title="citation (excluded)">{text}</span>'
-        return f'<span class="exclude" title="{html.escape(rule)} (excluded)">{text}</span>'
+            return f'<span class="citation"{meta}>{text}</span>'
+        return f'<span class="exclude"{meta}>{text}</span>'
     if dec in (Decision.FLAG, Decision.UNDECIDED):
-        return f'<span class="flag" title="{html.escape(rule)} (flagged)">{text}</span>'
+        return f'<span class="flag"{meta}>{text}</span>'
     return text
 
 
@@ -422,14 +729,216 @@ def _table_html(table) -> str:
             cells.append(f"<{tag}>{''.join(parts)}</{tag}>")
         rows.append("<tr>" + "".join(cells) + "</tr>")
     answer = table.answer.value if table.answer else "unresolved"
-    cap = (f"<caption style='text-align:left;color:#6e7781;font-size:.85rem;'>"
-           f"Table {table.table_index + 1} — {answer}</caption>")
-    return f"<table>{cap}{''.join(rows)}</table>"
+    answer_badge = {
+        "count_all": "badge-good",
+        "exclude_all": "badge-bad",
+        "headers_only": "badge-warn",
+        "unresolved": "badge-warn",
+    }.get(answer, "badge-warn")
+    answer_label = {
+        "count_all": "counted whole",
+        "exclude_all": "excluded whole",
+        "headers_only": "headers only",
+        "unresolved": "unresolved",
+    }.get(answer, answer)
+    return (
+        f'<table>'
+        f'<caption class="caption">'
+        f'Table {table.table_index + 1} '
+        f'<span class="badge {answer_badge}">{answer_label}</span>'
+        f'</caption>'
+        f'{"".join(rows)}'
+        f'</table>'
+    )
+
+
+def _build_statistics_html(stats: dict, result: dict) -> str:
+    sections = stats["sections"]
+    total_counted = result["total"] or 1
+
+    cards = [
+        ("Word count", str(result["total"]), "counted words"),
+        ("Sections", str(len(sections)), "headings + their content"),
+        ("Unique words", str(stats["unique_words"]),
+         f'{stats["richness_pct"]:.1f}% vocabulary richness'),
+        ("Longest paragraph", str(stats["longest_paragraph_words"]),
+         "words in the longest counted paragraph"),
+    ]
+    cards_html = "".join(
+        f'<div class="stat-card">'
+        f'<div class="label">{html.escape(label)}</div>'
+        f'<div class="value">{html.escape(value)}</div>'
+        f'<div class="sub">{html.escape(sub)}</div>'
+        f'</div>'
+        for label, value, sub in cards
+    )
+
+    palette = [
+        "#0969da", "#1a7f37", "#8250df", "#9a6700", "#cf222e",
+        "#0d9488", "#d97706", "#7c3aed", "#db2777", "#0284c7",
+    ]
+    bar_segments = []
+    for i, section in enumerate(sections):
+        pct = (section["words"] / total_counted) * 100
+        if pct <= 0:
+            continue
+        colour = palette[i % len(palette)]
+        bar_segments.append(
+            f'<div style="background:{colour};width:{pct:.2f}%" '
+            f'title="{html.escape(section["heading"])}: '
+            f'{section["words"]} words">'
+            f'{section["words"] if pct >= 6 else ""}</div>'
+        )
+    bar_html = (
+        f'<div class="section-bar">{"".join(bar_segments)}</div>'
+        if bar_segments else ""
+    )
+
+    section_items = []
+    for i, section in enumerate(sections):
+        pct = (section["words"] / total_counted) * 100
+        colour = palette[i % len(palette)]
+        tables_note = (
+            f' <span style="color:var(--grey);font-size:.8rem;">'
+            f'· {section["tables"]} table(s)</span>'
+            if section["tables"] else ""
+        )
+        section_items.append(
+            f'<li>'
+            f'<span class="name">'
+            f'<span style="display:inline-block;width:10px;height:10px;'
+            f'background:{colour};border-radius:2px;margin-right:.4rem;'
+            f'vertical-align:middle;"></span>'
+            f'{html.escape(section["heading"])}{tables_note}'
+            f'</span>'
+            f'<span class="count">{section["words"]}'
+            f'<span class="pct">{pct:.1f}%</span></span>'
+            f'</li>'
+        )
+    section_list = (
+        f'<ul class="section-list">{"".join(section_items)}</ul>'
+        if section_items else "<p><em>No countable sections.</em></p>"
+    )
+
+    longest = stats.get("longest_paragraph_preview") or "(none)"
+    return (
+        f'<div class="stat-cards">{cards_html}</div>'
+        f'{bar_html}'
+        f'<h3 style="font-size:1rem;margin:1rem 0 .5rem 0;">'
+        f'Words per section</h3>'
+        f'{section_list}'
+        f'<p style="color:var(--grey);font-size:.8rem;margin-top:1rem;">'
+        f'Longest paragraph preview: <em>{html.escape(longest)}</em></p>'
+    )
+
+
+def _build_summary_text(document: Document, result: dict) -> str:
+    lines = [
+        f"QCAA word count: {result['total']}",
+        f"File: {document.filename}",
+    ]
+    if result.get("tables"):
+        lines.append(f"Tables processed: {len(result['tables'])}")
+    cit = result.get("citations", {})
+    if cit.get("auto") or cit.get("manual"):
+        lines.append(
+            f"Citations excluded: {cit.get('auto', 0) + cit.get('manual', 0)}"
+        )
+    if result["buckets"]:
+        lines.append("")
+        lines.append("Excluded:")
+        for key in sorted(result["buckets"]):
+            lines.append(f"  {key}: {result['buckets'][key]} word(s)")
+    return "\n".join(lines)
+
+
+def build_html_preview(document: Document, result: dict) -> str:
+    body = []
+    for kind, obj in _interleaved_items(document):
+        if kind == "block":
+            body.append(_block_html(obj))
+        else:
+            body.append(_table_html(obj))
+    body_html = "\n".join(body) or "<p><em>(No content)</em></p>"
+
+    stats_rows = []
+    for key, count in sorted(result["buckets"].items()):
+        stats_rows.append(
+            f'<dt>{html.escape(key)}</dt><dd>{count} word(s)</dd>'
+        )
+    if result.get("math_objects"):
+        stats_rows.append(
+            f'<dt>Math objects</dt><dd>{result["math_objects"]} (excluded)</dd>'
+        )
+    if document.drawings:
+        stats_rows.append(
+            f'<dt>Drawings</dt><dd>{document.drawings} '
+            f'({document.drawings_with_text} contain text)</dd>'
+        )
+    if document.text_boxes:
+        stats_rows.append(
+            f'<dt>Text boxes</dt><dd>{len(document.text_boxes)}</dd>'
+        )
+
+    stats = compute_statistics(document, result)
+    statistics_html = _build_statistics_html(stats, result)
+
+    additional = ""
+    if result.get("tables"):
+        rows = []
+        for t in result["tables"]:
+            chosen_class = (
+                "table-chosen-count" if t["answer"] == "count_all"
+                else "table-chosen-exclude"
+            )
+            answer_label = {
+                "count_all": "counted whole",
+                "exclude_all": "excluded whole",
+                "headers_only": "headers only",
+                "unresolved": "unresolved",
+            }.get(t["answer"], t["answer"])
+            rows.append(
+                f'<tr><td>Table {t["index"]}</td>'
+                f'<td>{html.escape(t["suggestion"])}</td>'
+                f'<td class="{chosen_class}">{html.escape(answer_label)}</td>'
+                f'<td>{t["counted"]}</td>'
+                f'<td>{t["excluded"]}</td></tr>'
+            )
+        additional += (
+            "<div class='panel'><h2>Tables "
+            "<span class='badge badge-info'>per-table breakdown</span></h2>"
+            "<table><tr><th>#</th><th>Suggestion</th><th>Chosen</th>"
+            "<th>Counted</th><th>Excluded</th></tr>"
+            + "".join(rows) + "</table></div>"
+        )
+
+    cit = result.get("citations", {})
+    if cit.get("auto") or cit.get("manual"):
+        additional += (
+            f"<div class='panel'><h2>Citations "
+            f"<span class='badge badge-info'>APA 7 auto-detected</span></h2>"
+            f"<p>Auto-detected: <strong>{cit.get('auto', 0)}</strong> "
+            f"({cit.get('auto_words', 0)} words)<br>"
+            f"Manually added: <strong>{cit.get('manual', 0)}</strong> "
+            f"({cit.get('manual_words', 0)} words)</p></div>"
+        )
+
+    summary_text = _build_summary_text(document, result)
+
+    return _HTML_TEMPLATE.format(
+        filename=html.escape(document.filename or ""),
+        total=result["total"],
+        stats_rows="".join(stats_rows),
+        statistics_html=statistics_html,
+        body_html=body_html,
+        additional_panels=additional,
+        summary_json=json.dumps(summary_text),
+    )
 
 
 def write_html_preview(document: Document, result: dict,
                        output_path: str | None = None,
-                       open_browser: bool = False) -> str:
+                       open_browser: bool = True) -> str:
     html_text = build_html_preview(document, result)
     if output_path is None:
         base = os.path.splitext(document.filename or "preview")[0]
@@ -444,7 +953,7 @@ def write_html_preview(document: Document, result: dict,
 
 
 # ---------------------------------------------------------------------------
-# Decision log
+# Decision log export
 # ---------------------------------------------------------------------------
 
 def export_decisions(document: Document, result: dict, format: str = "json") -> str:

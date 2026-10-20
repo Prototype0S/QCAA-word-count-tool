@@ -1,4 +1,4 @@
-"""All interactive prompts in one place."""
+"""Interactive prompts for tables, captions, footnotes, citations."""
 from __future__ import annotations
 
 from .citations import (
@@ -6,26 +6,29 @@ from .citations import (
     count_occurrences_in_body,
     find_missed_candidates,
 )
-from .helpers import is_numeric_token  # noqa: F401  (kept for future use)
 from .model import (
     Citation, Decision, DecisionRecord, Document, Region, TableAnswer,
 )
+from .output import bold, bold_cyan, cyan, dim, green, grey, magenta, red, yellow
 from .tables import apply_table_answer, suggest_table_answer, table_has_strong_default
 
 
-QCAA_TABLE_HELP = """
-------------------------------------------------------------------
-TABLES (QCAA rule)
-------------------------------------------------------------------
-  Option 1 — Count the whole table (contains information).
-  Option 2 — Exclude the whole table (raw data or calculations).
-  Option 3 — Count the header row only, exclude the data rows.
+QCAA_TABLE_HELP = f"""
+{grey('-' * 66)}
+{cyan(bold('TABLES (QCAA rule)'))}
+{grey('-' * 66)}
+  Option 1 - {green('Count the whole table')} (contains information)
+  Option 2 - {red('Exclude the whole table')} (raw data or calculations)
+  Option 3 - {yellow('Count the header row only')}, exclude the data rows
+
+{grey('Note: even when a table is "counted whole", numbers, symbols and')}
+{grey('equations inside cells are still excluded by the span-level rules.')}
 """
 
-QCAA_CAPTION_HELP = """
-------------------------------------------------------------------
-CAPTIONS AND VISUAL ELEMENTS (QCAA rule)
-------------------------------------------------------------------
+QCAA_CAPTION_HELP = f"""
+{grey('-' * 66)}
+{cyan(bold('CAPTIONS AND VISUAL ELEMENTS (QCAA rule)'))}
+{grey('-' * 66)}
 QCAA excludes captions and other visual elements of written genres.
 But in science reports and PSMTs, captions often identify variables
 and count. When in doubt, ask your teacher.
@@ -35,37 +38,47 @@ and count. When in doubt, ask your teacher.
 def _menu(question: str, options: list[tuple[str, str]],
           default_key: str | None = None) -> str:
     print()
-    print(f"== {question} ==")
+    print(cyan(bold(f"== {question} ==")))
     for i, (key, label) in enumerate(options, start=1):
-        marker = "  (suggested)" if key == default_key else ""
-        print(f"  [{i}] {label}{marker}")
+        marker = "  " + yellow("(suggested)") if key == default_key else ""
+        print(f"  {yellow(f'[{i}]')} {label}{marker}")
     while True:
         default_hint = ""
         if default_key is not None:
             for i, (key, _) in enumerate(options, start=1):
                 if key == default_key:
-                    default_hint = f" [{i}]"
+                    default_hint = f" {yellow('[' + str(i) + ']')}"
                     break
         try:
-            raw = input(f"\nYour choice{default_hint}: ").strip()
+            raw = input(f"\n{bold('Your choice')}{default_hint}: ").strip()
         except (EOFError, KeyboardInterrupt):
             raw = ""
         if not raw and default_key is not None:
             return default_key
         if not raw.isdigit():
-            print("Please type a number.")
+            print(red("Please type a number."))
             continue
         idx = int(raw) - 1
         if 0 <= idx < len(options):
             return options[idx][0]
-        print(f"Please type a number between 1 and {len(options)}.")
+        print(red(f"Please type a number between 1 and {len(options)}."))
+
+
+def _panel(title: str, subtitle: str = "") -> None:
+    """Print a coloured panel header."""
+    print()
+    print(grey("-" * 66))
+    line = cyan(bold(title))
+    if subtitle:
+        line += "  " + grey(subtitle)
+    print(line)
 
 
 def preview_table(table, max_rows: int = 4) -> str:
     lines = []
     for r_idx, row in enumerate(table.rows):
         if r_idx >= max_rows:
-            lines.append(f"... ({len(table.rows) - max_rows} more row(s))")
+            lines.append(grey(f"... ({len(table.rows) - max_rows} more row(s))"))
             break
         cells = []
         for cell in row:
@@ -76,6 +89,10 @@ def preview_table(table, max_rows: int = 4) -> str:
         lines.append(" | ".join(cells))
     return "\n".join(lines)
 
+
+# ---------------------------------------------------------------------------
+# Appendixes
+# ---------------------------------------------------------------------------
 
 def resolve_appendixes(document: Document, auto_accept: bool) -> bool:
     appendix_blocks = [
@@ -89,39 +106,45 @@ def resolve_appendixes(document: Document, auto_accept: bool) -> bool:
     if auto_accept:
         for b in appendix_blocks:
             b.region_record.as_manual_override(
-                Decision.EXCLUDE, reason="Auto-accepted (--default)",
+                Decision.COUNT, reason="Auto-accepted (--default)",
             )
+        print(green("  Appendix(es) auto-counted."))
         return True
 
-    print()
-    print(f"Appendix region detected ({len(appendix_blocks)} block(s))")
-    print(f"Starts at: {appendix_blocks[0].text[:80]}")
+    _panel(f"Appendix region detected",
+           f"{len(appendix_blocks)} block(s)")
+    print(f'  Starts at: {grey(appendix_blocks[0].text[:80])}')
     choice = _menu(
         "How should this appendix be treated?",
         [
-            ("exclude", "Exclude this appendix"),
-            ("include", "Include this appendix"),
+            ("exclude", f"{red('Exclude')} this appendix"),
+            ("include", f"{green('Include')} this appendix"),
             ("all",     "Accept suggestions for all remaining prompts"),
         ],
-        default_key="include",
+        default_key="exclude",
     )
     if choice == "all":
         for b in appendix_blocks:
             b.region_record.as_manual_override(
-                Decision.EXCLUDE, reason="Auto-accepted (user chose Accept All)",
+                Decision.COUNT, reason="Auto-accepted (user chose Accept All)",
             )
         return True
     dec = Decision.EXCLUDE if choice == "exclude" else Decision.COUNT
-    reason = "User chose to exclude appendix" if choice == "exclude" else "User chose to include appendix"
+    reason = ("User chose to exclude appendix" if choice == "exclude"
+              else "User chose to include appendix")
     for b in appendix_blocks:
         b.region_record.as_manual_override(dec, reason=reason)
     return auto_accept
 
 
+# ---------------------------------------------------------------------------
+# Text boxes
+# ---------------------------------------------------------------------------
+
 def resolve_text_boxes(document: Document, auto_accept: bool) -> bool:
     boxes = [
         b for b in document.blocks
-        if b.block_type == b.block_type.TEXT_BOX  # type: ignore[attr-defined]
+        if b.block_type.value == "text_box"
         and b.region_record.decision in (Decision.FLAG, Decision.UNDECIDED)
     ]
     if not boxes:
@@ -131,16 +154,17 @@ def resolve_text_boxes(document: Document, auto_accept: bool) -> bool:
             b.region_record.as_manual_override(
                 Decision.COUNT, reason="Auto-accepted text box",
             )
+        print(green(f"  {len(boxes)} text box(es) auto-counted."))
         return True
-    print()
-    print(f"{len(boxes)} text box(es) detected")
+
+    _panel(f"{len(boxes)} text box(es) detected")
     for b in boxes[:5]:
-        print(f"  - {b.text.strip()[:70]}")
+        print(f"  - {grey(b.text.strip()[:70])}")
     choice = _menu(
         "How should text box content be treated?",
         [
-            ("count",   "Count (treat as prose)"),
-            ("exclude", "Exclude (treat as visual)"),
+            ("count",   f"{green('Count')} (treat as prose)"),
+            ("exclude", f"{red('Exclude')} (treat as visual)"),
         ],
         default_key="count",
     )
@@ -151,32 +175,56 @@ def resolve_text_boxes(document: Document, auto_accept: bool) -> bool:
     return auto_accept
 
 
+# ---------------------------------------------------------------------------
+# Tables
+# ---------------------------------------------------------------------------
+
 def resolve_tables(document: Document, auto_accept: bool) -> bool:
     if not document.tables:
         return auto_accept
-    print()
-    print(f"{len(document.tables)} table(s) found.")
+
+    if auto_accept:
+        for table in document.tables:
+            if table.answer is not None:
+                continue
+            table.answer = TableAnswer.COUNT_ALL
+            apply_table_answer(
+                table, TableAnswer.COUNT_ALL,
+                reason="Auto-accepted (include all)",
+            )
+        print(green(f"  All {len(document.tables)} table(s) auto-counted."))
+        return True
+
+    _panel(f"{len(document.tables)} table(s) found.")
     for i, table in enumerate(document.tables, start=1):
         if table.answer is not None:
             continue
-        if auto_accept:
-            suggested = suggest_table_answer(table)
-            table.answer = suggested
-            apply_table_answer(table, suggested, reason="Auto-accepted")
-            continue
+
         print()
-        print(f"Table {i} of {len(document.tables)}")
-        print(f"Suggested: {table.suggestion.value} "
-              f"(confidence {table.suggestion_confidence:.2f})")
+        print(grey(f"--- Table {i} of {len(document.tables)} ---"))
+        conf = table.suggestion_confidence
+        if table.suggestion.value == "information":
+            sugg = green(table.suggestion.value)
+        elif table.suggestion.value in ("raw_data", "calculation"):
+            sugg = red(table.suggestion.value)
+        else:
+            sugg = yellow(table.suggestion.value)
+        print(f"Suggested: {sugg} {grey(f'(confidence {conf:.2f})')}")
+        print()
         print(preview_table(table))
-        print(f"  {table.word_count} word(s) in this table.")
-        default_key = suggest_table_answer(table).value if table_has_strong_default(table) else None
+        print()
+        print(f"  {bold(str(table.word_count))} {grey('word(s) in this table.')}")
+
+        default_key = (
+            suggest_table_answer(table).value if table_has_strong_default(table)
+            else None
+        )
         choice = _menu(
             "How should this table be counted?",
             [
-                ("count_all",    "Count the whole table (information)"),
-                ("exclude_all",  "Exclude the whole table (raw data or calculations)"),
-                ("headers_only", "Count the header row only, exclude the data rows"),
+                ("count_all",    f"{green('Count the whole table')} (information)"),
+                ("exclude_all",  f"{red('Exclude the whole table')} (raw data or calculations)"),
+                ("headers_only", f"{yellow('Count the header row only')}, exclude the data rows"),
                 ("help",         "Explain the QCAA rule for tables"),
                 ("all",          "Accept the tool's suggestions for remaining tables"),
             ],
@@ -196,41 +244,52 @@ def resolve_tables(document: Document, auto_accept: bool) -> bool:
             )
         if choice == "all":
             auto_accept = True
-            suggested = suggest_table_answer(table)
-            table.answer = suggested
-            apply_table_answer(table, suggested, reason="Auto-accepted")
+            table.answer = TableAnswer.COUNT_ALL
+            apply_table_answer(
+                table, TableAnswer.COUNT_ALL,
+                reason="Auto-accepted (user chose Accept All)",
+            )
             continue
         table.answer = TableAnswer(choice)
         apply_table_answer(table, table.answer, reason=f"User chose '{choice}'")
     return auto_accept
 
 
+# ---------------------------------------------------------------------------
+# Captions
+# ---------------------------------------------------------------------------
+
 def resolve_captions(document: Document, auto_accept: bool) -> bool:
     caption_blocks = [b for b in document.blocks if b.is_visual]
     if not caption_blocks:
         return auto_accept
-    print()
-    print(f"{len(caption_blocks)} caption/visual element(s) detected.")
+
+    if auto_accept:
+        for block in caption_blocks:
+            if block.region_record.decision in (Decision.COUNT, Decision.EXCLUDE):
+                continue
+            block.region_record.as_manual_override(
+                Decision.COUNT, reason="Auto-accepted (--default)",
+            )
+        print(green(f"  {len(caption_blocks)} caption(s)/visual element(s) auto-counted."))
+        return True
+
+    _panel(f"{len(caption_blocks)} caption/visual element(s) detected.")
     for i, block in enumerate(caption_blocks, start=1):
         if block.region_record.decision in (Decision.COUNT, Decision.EXCLUDE):
             continue
-        if auto_accept:
-            block.region_record.as_manual_override(
-                Decision.EXCLUDE, reason="Auto-accepted (--default)",
-            )
-            continue
         print()
-        print(f"Caption {i} of {len(caption_blocks)}")
-        print(f'  "{block.text.strip()[:120]}"')
+        print(grey(f"--- Caption {i} of {len(caption_blocks)} ---"))
+        print(f'  "{cyan(block.text.strip()[:120])}"')
         choice = _menu(
             "How should this caption be counted?",
             [
-                ("exclude", "Exclude it (QCAA's default)"),
-                ("count",   "Count it (names variables or carries information)"),
+                ("exclude", f"{red('Exclude')} it (QCAA's default)"),
+                ("count",   f"{green('Count')} it (names variables or carries information)"),
                 ("help",    "Explain the QCAA rule for captions"),
                 ("all",     "Accept suggestions for all remaining captions"),
             ],
-            default_key="include",
+            default_key="exclude",
         )
         if choice == "help":
             print(QCAA_CAPTION_HELP)
@@ -241,12 +300,12 @@ def resolve_captions(document: Document, auto_accept: bool) -> bool:
                     ("count",   "Count it"),
                     ("all",     "Accept suggestions for all remaining captions"),
                 ],
-                default_key="include",
+                default_key="exclude",
             )
         if choice == "all":
             auto_accept = True
             block.region_record.as_manual_override(
-                Decision.EXCLUDE, reason="Auto-accepted (user chose Accept All)",
+                Decision.COUNT, reason="Auto-accepted (user chose Accept All)",
             )
         elif choice == "exclude":
             block.region_record.as_manual_override(
@@ -259,25 +318,34 @@ def resolve_captions(document: Document, auto_accept: bool) -> bool:
     return auto_accept
 
 
+# ---------------------------------------------------------------------------
+# Footnotes
+# ---------------------------------------------------------------------------
+
 def resolve_footnotes(document: Document, auto_accept: bool) -> bool:
     if not document.footnotes:
         return auto_accept
-    print()
-    print(f"{len(document.footnotes)} footnote/endnote(s) detected.")
-    for i, fn in enumerate(document.footnotes, start=1):
-        if fn.answer is not None:
-            continue
-        if auto_accept:
-            fn.answer = "exclude" if fn.suggestion == "bibliographic" else "count"
+
+    if auto_accept:
+        for fn in document.footnotes:
+            if fn.answer is not None:
+                continue
+            fn.answer = "count"
             fn.answer_record = DecisionRecord(
-                decision=Decision.EXCLUDE if fn.answer == "exclude" else Decision.COUNT,
+                decision=Decision.COUNT,
                 rule_id="F-AUTO", confidence=0.6,
                 reason="Auto-accepted", source="manual",
             )
+        print(green(f"  {len(document.footnotes)} footnote(s) auto-counted."))
+        return True
+
+    _panel(f"{len(document.footnotes)} footnote/endnote(s) detected.")
+    for i, fn in enumerate(document.footnotes, start=1):
+        if fn.answer is not None:
             continue
         print()
-        print(f"Footnote {i} of {len(document.footnotes)} ({fn.kind})")
-        print(f'  "{fn.text[:200]}"')
+        print(grey(f"--- Footnote {i} of {len(document.footnotes)} ({fn.kind}) ---"))
+        print(f'  "{cyan(fn.text[:200])}"')
         default = None
         if fn.suggestion == "bibliographic":
             default = "exclude"
@@ -286,18 +354,17 @@ def resolve_footnotes(document: Document, auto_accept: bool) -> bool:
         choice = _menu(
             "How should this footnote be treated?",
             [
-                ("exclude", "Exclude (purely a bibliographic reference)"),
-                ("count",   "Count (contains commentary or content)"),
+                ("exclude", f"{red('Exclude')} (purely a bibliographic reference)"),
+                ("count",   f"{green('Count')} (contains commentary or content)"),
                 ("all",     "Accept suggestions for all remaining footnotes"),
             ],
             default_key=default,
         )
         if choice == "all":
             auto_accept = True
-            suggested = "exclude" if fn.suggestion == "bibliographic" else "count"
-            fn.answer = suggested
+            fn.answer = "count"
             fn.answer_record = DecisionRecord(
-                decision=Decision.EXCLUDE if suggested == "exclude" else Decision.COUNT,
+                decision=Decision.COUNT,
                 rule_id="F-AUTO", confidence=0.6,
                 reason="Auto-accepted (user chose Accept All)", source="manual",
             )
@@ -311,17 +378,20 @@ def resolve_footnotes(document: Document, auto_accept: bool) -> bool:
     return auto_accept
 
 
+# ---------------------------------------------------------------------------
+# Citations
+# ---------------------------------------------------------------------------
+
 def resolve_citations(document: Document) -> None:
-    print()
-    print("Citation detection")
+    _panel("Citation detection", "(APA 7)")
     auto = [c for c in document.citations if c.source == "auto"]
     if auto:
-        print(f"Found {len(auto)} in-text citation(s):")
+        print(f"Found {bold(green(str(len(auto))))} in-text citation(s):")
         for i, c in enumerate(auto, start=1):
-            occ = "" if c.occurrences == 1 else f" (x{c.occurrences})"
-            print(f"  {i:>3}. {c.text}{occ}")
+            occ = "" if c.occurrences == 1 else f" {grey(f'(x{c.occurrences})')}"
+            print(f"  {yellow(f'{i:>3}.')} {magenta(c.text)}{occ}")
     else:
-        print("No APA 7 in-text citations detected.")
+        print(grey("No APA 7 in-text citations detected."))
     apply_citation_exclusions(document)
 
     missed = find_missed_candidates(document)
@@ -329,21 +399,26 @@ def resolve_citations(document: Document) -> None:
         return
 
     print()
-    print(f"{len(missed)} other parenthetical(s) contain a year but weren't")
+    print(grey("-" * 66))
+    print(f"{yellow(str(len(missed)))} other parenthetical(s) contain a year but weren't")
     print("auto-excluded. Choose which (if any) to exclude.")
-    print("  Type a number to exclude. 'a' for all. Enter to finish.")
+    print()
+    print(grey("  Type a number to exclude. 'a' for all. Enter to finish."))
+    print()
 
     extra: list[Citation] = []
     remaining = list(enumerate(missed, start=1))
     while True:
         if remaining:
-            print("Remaining:")
+            print(bold("Remaining:"))
             for i, m in remaining:
-                print(f"  [{i}] {m}")
+                print(f"  {yellow(f'[{i}]')} {m}")
+            print()
         else:
-            print("  (No candidates remaining.)")
+            print(grey("  (No candidates remaining.)"))
+            print()
         try:
-            raw = input("> ").strip()
+            raw = input(f"{bold('>')} ").strip()
         except (EOFError, KeyboardInterrupt):
             break
         if not raw:
@@ -354,28 +429,33 @@ def resolve_citations(document: Document) -> None:
                 if count:
                     extra.append(Citation(text=m, occurrences=count, source="manual"))
             remaining = []
+            print(green("  Excluded all remaining candidates."))
             continue
         if not raw.isdigit():
-            print("  Please type a number, 'a', or Enter to finish.")
+            print(red("  Please type a number, 'a', or Enter to finish."))
             continue
         choice = int(raw)
         match = next((m for idx, m in remaining if idx == choice), None)
         if match is None:
-            print(f"  No candidate #{choice}.")
+            print(red(f"  No candidate #{choice}."))
             continue
         count = count_occurrences_in_body(document, match)
         if count == 0:
-            print(f"  Not found in body: {match}")
+            print(yellow(f"  Not found in body: {match}"))
         else:
             extra.append(Citation(text=match, occurrences=count, source="manual"))
-            print(f"  Excluded {count} occurrence(s).")
+            print(green(f"  Excluded {count} occurrence(s)."))
         remaining = [(i, m) for i, m in remaining if m != match]
 
     if extra:
         document.citations.extend(extra)
         apply_citation_exclusions(document)
-        print(f"Added {len(extra)} citation(s).")
+        print(green(f"Added {len(extra)} citation(s)."))
 
+
+# ---------------------------------------------------------------------------
+# Top-level
+# ---------------------------------------------------------------------------
 
 def resolve_all(document: Document, auto_accept: bool = False) -> None:
     auto_accept = resolve_appendixes(document, auto_accept)
