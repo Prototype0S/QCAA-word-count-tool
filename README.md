@@ -47,20 +47,9 @@ https://www.qcaa.qld.edu.au/senior/certificates-and-qualifications/qce-qcia-hand
   aren't currently covered) **I do not have plans currently to add support for styles OTHER THAN APA 7**
 - Text inside floating text boxes, or a table nested inside another table
   (both are edge cases python-docx doesn't expose directly)
-- Anything else — wrap it in plain-text markers anywhere in the document
-  and the script will exclude it:
 
-  ```
-  [[QCAA_EXCLUDE_START]]  ... content to ignore ...  [[QCAA_EXCLUDE_END]]
-  ```
-
-  (e.g. wrap a title page or a blank-page placeholder in these)
-
-Struct-based exclusion (Contents/References/etc.) relies on the section
-titles actually using Word's **Heading 1/2/3...** paragraph styles. If a
-document was drafted in Google Docs and pasted into Word without reapplying
-heading styles, none of that structural detection will fire — apply real
-heading styles first.
+- Struct-based exclusion (Contents/References/etc.) relies on the section titles **actually** using Word's **Heading 1/2/3...** paragraph styles. If a
+document was drafted in Google Docs and pasted into Word without reapplying heading styles, **none of that structural detection will fire — apply real heading styles first.**
 
 ## Installation
 
@@ -100,6 +89,7 @@ Some exclusion/inclusion calls in the QCAA rules are genuinely subjective
 (e.g. whether a table counts as "raw/processed data" or "other information").
 Always sanity-check the final number, especially around tables, footnotes,
 and any citation style the pattern-matcher might not recognise.
+**I do not plan on adding the additional features shown in the *example* section just yet.**
 **This was also made with Claude AI and DeepSeek AI**
 ## Contributing
 
