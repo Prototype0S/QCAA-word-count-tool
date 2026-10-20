@@ -67,6 +67,17 @@ def span_to_ansi(span: Span) -> str:
     return span.text
 
 
+def _interleaved_items(document):
+    items = []
+    for b in document.blocks:
+        items.append((b.block_index, 1, "block", b))
+    for t in document.tables:
+        items.append((t.block_index, 0, "table", t))
+    items.sort(key=lambda x: (x[0], x[1]))
+    for _, _, kind, obj in items:
+        yield kind, obj
+
+
 def print_ansi_preview(document: Document) -> None:
     print("=" * 78)
     print(bold("COLOUR-CODED PREVIEW"))
@@ -75,29 +86,90 @@ def print_ansi_preview(document: Document) -> None:
     print("=" * 78)
     print()
 
-    for block in document.blocks:
-        if not block.spans:
-            continue
-        if block.block_type == BlockType.HEADING:
+    for kind, obj in _interleaved_items(document):
+        if kind == "block":
+            block = obj
+            if not block.spans:
+                continue
+            if block.block_type == BlockType.HEADING:
+                print()
+                print(cyan(bold(block.text.strip())))
+                continue
+            if block.region_record.decision == Decision.EXCLUDE:
+                print(grey(block.text.strip()))
+                continue
+            print("".join(span_to_ansi(s) for s in block.spans))
+        else:
+            table = obj
             print()
-            print(cyan(bold(block.text.strip())))
-            continue
-        if block.region_record.decision == Decision.EXCLUDE:
-            print(grey(block.text.strip()))
-            continue
-        print("".join(span_to_ansi(s) for s in block.spans))
-
-    for table in document.tables:
-        print()
-        answer = table.answer.value if table.answer else "unresolved"
-        print(cyan(bold(f"Table {table.table_index + 1} — {answer}")))
-        for row in table.rows:
-            row_strs = [" ".join(span_to_ansi(s) for s in cell.spans) for cell in row]
-            print(" | ".join(row_strs))
+            answer = table.answer.value if table.answer else "unresolved"
+            print(cyan(bold(f"Table {table.table_index + 1} — {answer}")))
+            for row in table.rows:
+                row_strs = [" ".join(span_to_ansi(s) for s in cell.spans)
+                            for cell in row]
+                print(" | ".join(row_strs))
 
     print()
     print("=" * 78)
 
+
+def build_html_preview(document: Document, result: dict) -> str:
+    body = []
+    for kind, obj in _interleaved_items(document):
+        if kind == "block":
+            body.append(_block_html(obj))
+        else:
+            body.append(_table_html(obj))
+    body_html = "\n".join(body) or "<p><em>(No content)</em></p>"
+
+    stats_rows = []
+    for key, count in sorted(result["buckets"].items()):
+        stats_rows.append(f"<dt>{html.escape(key)}</dt><dd>{count} word(s)</dd>")
+    if result.get("math_objects"):
+        stats_rows.append(
+            f"<dt>Math objects</dt><dd>{result['math_objects']} (excluded)</dd>"
+        )
+    if document.drawings:
+        stats_rows.append(
+            f"<dt>Drawings</dt><dd>{document.drawings} "
+            f"({document.drawings_with_text} contain text)</dd>"
+        )
+    if document.text_boxes:
+        stats_rows.append(f"<dt>Text boxes</dt><dd>{len(document.text_boxes)}</dd>")
+
+    additional = ""
+    if result.get("tables"):
+        rows = []
+        for t in result["tables"]:
+            rows.append(
+                f"<tr><td>Table {t['index']}</td><td>{html.escape(t['suggestion'])}</td>"
+                f"<td>{html.escape(t['answer'])}</td>"
+                f"<td>{t['counted']}</td><td>{t['excluded']}</td></tr>"
+            )
+        additional += (
+            "<div class='panel'><h2>Tables</h2><table>"
+            "<tr><th>#</th><th>Suggestion</th><th>Chosen</th>"
+            "<th>Counted</th><th>Excluded</th></tr>"
+            + "".join(rows) + "</table></div>"
+        )
+
+    cit = result.get("citations", {})
+    if cit.get("auto") or cit.get("manual"):
+        additional += (
+            f"<div class='panel'><h2>Citations</h2>"
+            f"<p>Auto-detected (APA 7): <strong>{cit.get('auto', 0)}</strong> "
+            f"({cit.get('auto_words', 0)} words)<br>"
+            f"Manually added: <strong>{cit.get('manual', 0)}</strong> "
+            f"({cit.get('manual_words', 0)} words)</p></div>"
+        )
+
+    return _HTML_TEMPLATE.format(
+        filename=html.escape(document.filename or ""),
+        total=result["total"],
+        stats_rows="".join(stats_rows),
+        body_html=body_html,
+        additional_panels=additional,
+    )
 
 # ---------------------------------------------------------------------------
 # Plain report
@@ -353,64 +425,6 @@ def _table_html(table) -> str:
     cap = (f"<caption style='text-align:left;color:#6e7781;font-size:.85rem;'>"
            f"Table {table.table_index + 1} — {answer}</caption>")
     return f"<table>{cap}{''.join(rows)}</table>"
-
-
-def build_html_preview(document: Document, result: dict) -> str:
-    body = []
-    for block in document.blocks:
-        body.append(_block_html(block))
-    for table in document.tables:
-        body.append(_table_html(table))
-    body_html = "\n".join(body) or "<p><em>(No content)</em></p>"
-
-    stats_rows = []
-    for key, count in sorted(result["buckets"].items()):
-        stats_rows.append(f"<dt>{html.escape(key)}</dt><dd>{count} word(s)</dd>")
-    if result.get("math_objects"):
-        stats_rows.append(
-            f"<dt>Math objects</dt><dd>{result['math_objects']} (excluded)</dd>"
-        )
-    if document.drawings:
-        stats_rows.append(
-            f"<dt>Drawings</dt><dd>{document.drawings} "
-            f"({document.drawings_with_text} contain text)</dd>"
-        )
-    if document.text_boxes:
-        stats_rows.append(f"<dt>Text boxes</dt><dd>{len(document.text_boxes)}</dd>")
-
-    additional = ""
-    if result.get("tables"):
-        rows = []
-        for t in result["tables"]:
-            rows.append(
-                f"<tr><td>Table {t['index']}</td><td>{html.escape(t['suggestion'])}</td>"
-                f"<td>{html.escape(t['answer'])}</td>"
-                f"<td>{t['counted']}</td><td>{t['excluded']}</td></tr>"
-            )
-        additional += (
-            "<div class='panel'><h2>Tables</h2><table>"
-            "<tr><th>#</th><th>Suggestion</th><th>Chosen</th>"
-            "<th>Counted</th><th>Excluded</th></tr>"
-            + "".join(rows) + "</table></div>"
-        )
-
-    cit = result.get("citations", {})
-    if cit.get("auto") or cit.get("manual"):
-        additional += (
-            f"<div class='panel'><h2>Citations</h2>"
-            f"<p>Auto-detected (APA 7): <strong>{cit.get('auto', 0)}</strong> "
-            f"({cit.get('auto_words', 0)} words)<br>"
-            f"Manually added: <strong>{cit.get('manual', 0)}</strong> "
-            f"({cit.get('manual_words', 0)} words)</p></div>"
-        )
-
-    return _HTML_TEMPLATE.format(
-        filename=html.escape(document.filename or ""),
-        total=result["total"],
-        stats_rows="".join(stats_rows),
-        body_html=body_html,
-        additional_panels=additional,
-    )
 
 
 def write_html_preview(document: Document, result: dict,

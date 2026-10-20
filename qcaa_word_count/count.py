@@ -20,7 +20,8 @@ def count_words(document: Document) -> dict:
     for block in document.blocks:
         total_math_objects += block.math_object_count
         if block.region_record.decision == Decision.EXCLUDE:
-            buckets[f"region:{block.region.value}"] += len(block.spans)
+            rule = block.region_record.rule_id or "R-REGION"
+            buckets[f"excluded:{rule}"] += len(block.spans)
             continue
         if block.region_record.decision in (Decision.FLAG, Decision.UNDECIDED):
             buckets[f"flagged:{block.region.value}"] += len(block.spans)
