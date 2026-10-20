@@ -9,7 +9,16 @@ echo   QCAA WORD COUNT TOOL
 echo ============================================================
 echo.
 
-REM --- Check Python is available -------------------------------------
+REM --- Warn if running from a temporary or synced folder -------------
+echo %~dp0 | findstr /i /c:"\\Downloads\\" /c:"\\Temp\\" >nul
+if %errorlevel% equ 0 (
+    echo NOTE: You are running the tool from Downloads or Temp.
+    echo       It is better to move the folder somewhere permanent
+    echo       like Documents\qcaa-word-count first.
+    echo.
+)
+
+REM --- Check Python is available and recent enough -------------------
 where python >nul 2>nul
 if %errorlevel% neq 0 (
     echo ERROR: Python is not installed or not on PATH.
@@ -19,6 +28,17 @@ if %errorlevel% neq 0 (
     echo      "Add Python to PATH"
     echo   3. Then double-click this file again.
     echo.
+    pause
+    exit /b 1
+)
+
+REM --- Check Python version is >= 3.10 -------------------------------
+for /f "tokens=2 delims= " %%v in ('python --version 2^>^&1') do set PYVER=%%v
+echo Found Python %PYVER%
+python -c "import sys; sys.exit(0 if sys.version_info >= (3,10) else 1)" >nul 2>nul
+if errorlevel 1 (
+    echo ERROR: Python %PYVER% is too old. This tool needs Python 3.10 or newer.
+    echo Install a newer version from https://www.python.org/downloads/
     pause
     exit /b 1
 )
