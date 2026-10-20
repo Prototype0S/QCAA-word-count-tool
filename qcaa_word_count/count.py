@@ -3,7 +3,25 @@ from __future__ import annotations
 
 from collections import defaultdict
 
-from .model import Decision, Document
+from .model import Decision, Document, Table
+
+
+def _table_is_in_excluded_region(document: Document, table: Table) -> bool:
+    """True if the block immediately preceding this table is excluded.
+
+    [FIX 5] Tables were previously counted regardless of region, so a
+    table inside an excluded appendix (or title page) still added its
+    words to the total. `table.block_index` is the block index that
+    the *next* paragraph would have been given, so every block with
+    `block_index < table.block_index` precedes the table.
+    """
+    prev = None
+    for block in document.blocks:
+        if block.block_index < table.block_index:
+            prev = block
+        else:
+            break
+    return prev is not None and prev.region_record.decision == Decision.EXCLUDE
 
 
 def count_words(document: Document) -> dict:
@@ -36,6 +54,20 @@ def count_words(document: Document) -> dict:
                     bucket_samples[key].append(span.text)
 
     for table in document.tables:
+        # [FIX 5] Skip tables that live inside an excluded region.
+        if _table_is_in_excluded_region(document, table):
+            table_summary.append({
+                "index": table.table_index + 1,
+                "suggestion": table.suggestion.value,
+                "answer": "excluded (region)",
+                "counted": 0,
+                "excluded": sum(len(c.spans) for c in table.iter_cells()),
+            })
+            buckets["table:excluded (in excluded region)"] += sum(
+                len(c.spans) for c in table.iter_cells()
+            )
+            continue
+
         counted = excluded = 0
         for cell in table.iter_cells():
             total_math_objects += cell.math_object_count
@@ -90,5 +122,5 @@ def count_words(document: Document) -> dict:
         "footnotes": footnote_summary,
         "math_objects": total_math_objects,
         "unresolved_footnotes": unresolved_footnotes,
-        "stated_count": None,   # filled in by pipeline.extract_stated_count    
+        "stated_count": None,   # filled in by pipeline.extract_stated_count
     }

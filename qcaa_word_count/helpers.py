@@ -152,6 +152,26 @@ _UNIT_ONLY_RE = re.compile(
     r"A|mA|Pa|kPa|MPa|Hz|kHz|MHz|rad|sr|cd|lm|lx|Bq|Gy|Sv|kat|bar|atm|psi)$"
 )
 
+# [FIX 1] Ordinals are words, not number-units.
+# "the 1st experiment", "2nd attempt", "3rd place", "4th quarter"
+_ORDINAL_RE = re.compile(r"^-?\d+(?:st|nd|rd|th)$", re.IGNORECASE)
+
+# [FIX 1b] Common "number+letters" tokens that are words/adjectives,
+# not quantities. Whitelisted, because a generic rule would also
+# swallow real units like "5mL".
+_TECH_ADJECTIVES = frozenset({
+    "1d", "2d", "3d", "4d",
+    "1k", "2k", "3k", "4k", "5k", "8k",
+    "5g", "6g",
+    "2fa", "3pl", "4pl",
+    "covid19",  # belt and braces; regex ^\d would not match anyway
+})
+
+# [FIX 1c] Compound "number-word-number" forms are words.
+# "1-to-1 tuition", "2-in-1 laptop"
+_NUMBER_WORD_NUMBER_RE = re.compile(r"^\d+-(?:to|in|by|on|at|of|per)-\d+$",
+                                    re.IGNORECASE)
+
 
 def is_numeric_token(tok: str) -> bool:
     has_letter = any(c.isalpha() for c in tok)
@@ -160,6 +180,11 @@ def is_numeric_token(tok: str) -> bool:
 
 
 def is_number_unit_token(tok: str) -> bool:
+    # [FIX 1] ordinals and tech-adjectives are not number-units
+    if _ORDINAL_RE.match(tok):
+        return False
+    if tok.lower() in _TECH_ADJECTIVES:
+        return False
     return bool(_NUMBER_UNIT_RE.match(tok))
 
 
@@ -172,6 +197,10 @@ def is_symbol_token(tok: str) -> bool:
 
 
 def is_equation_token(tok: str) -> bool:
+    # [FIX 1c] compound number-word-number forms are words
+    if _NUMBER_WORD_NUMBER_RE.match(tok):
+        return False
+
     if any(op in tok for op in MATH_SYMBOLS):
         return True
     if any(c in SUPERSCRIPT_DIGITS for c in tok):
@@ -197,7 +226,12 @@ def _contains_bracket(tok: str) -> bool:
     return any(c in "()[]{}" for c in tok)
 
 
-def is_equation_heavy_block(block: Block, threshold: float = 0.4) -> bool:
+def is_equation_heavy_block(block: Block, threshold: float = 0.55) -> bool:
+    # [FIX 4a] Threshold raised 0.40 -> 0.55. A paragraph only has to
+    # *dominate* in mathy tokens to trigger equation-heavy heuristics,
+    # not merely contain a minority of them. This stops science prose
+    # like "The 5 kg mass (labelled m) was 2 m from the pivot" from
+    # being classified as equation-heavy.
     if not block.spans:
         return False
     mathy = 0
@@ -266,10 +300,21 @@ def classify_span(
         )
 
     if equation_heavy and _contains_bracket(tok):
-        return SpanType.EQUATION, _rec(
-            Decision.EXCLUDE, "I-EQUATION-FRAGMENT", 0.75,
-            "bracketed token inside equation-heavy text",
+        # [FIX 4b] Only exclude bracketed tokens when the *contents*
+        # look mathy. "(labelled" and "(point" are prose punctuation,
+        # not equation fragments, even in an equation-heavy paragraph.
+        inner = tok.strip("()[]{}")
+        mathy_inner = (
+            any(c.isdigit() for c in inner)
+            or any(c in MATH_SYMBOLS or c in GREEK_LETTERS for c in inner)
+            or (inner.isalpha() and len(inner) == 1)
         )
+        if mathy_inner:
+            return SpanType.EQUATION, _rec(
+                Decision.EXCLUDE, "I-EQUATION-FRAGMENT", 0.75,
+                "bracketed token inside equation-heavy text",
+            )
+        # fall through to word below
 
     if is_unit_token(tok):
         return SpanType.UNIT, _rec(

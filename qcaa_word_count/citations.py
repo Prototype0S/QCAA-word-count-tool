@@ -37,6 +37,27 @@ APA_PATTERNS: list[tuple[str, re.Pattern]] = [
     )),
 ]
 
+# [FIX 3] Words that look like author surnames but aren't. Prevents
+# "(Figure, 2020)" and "(Note, 2020)" from being excluded as citations.
+_NON_AUTHOR_WORDS = frozenset({
+    "figure", "fig", "figs", "table", "tbl", "tables",
+    "section", "sect", "chapter", "ch", "part", "appendix", "app",
+    "page", "pages", "p", "pp", "vol", "volume", "vols",
+    "issue", "no", "number", "note", "notes", "see", "cf",
+    "exhibit", "graph", "chart", "diagram", "image", "photo",
+    "map", "plate", "equation", "eq", "eqs", "formula",
+    "example", "ex", "source", "case", "step", "phase",
+    "in", "of", "the", "a", "an", "and", "or", "by",
+})
+
+
+def _author_is_plausible(matched: str) -> bool:
+    """Reject matches whose leading token is a non-author noun."""
+    m = re.match(r"[\(\s]*([A-Za-z'’\-]+)", matched)
+    if not m:
+        return True
+    return m.group(1).lower() not in _NON_AUTHOR_WORDS
+
 
 def find_apa_citations(text: str) -> list[tuple[str, str]]:
     found = []
@@ -46,8 +67,12 @@ def find_apa_citations(text: str) -> list[tuple[str, str]]:
             start, end = m.span()
             if any(s < end and start < e for s, e in claimed):
                 continue
+            matched = m.group(0)
+            # [FIX 3] reject non-author "surnames"
+            if not _author_is_plausible(matched):
+                continue
             claimed.append((start, end))
-            found.append((m.group(0), name))
+            found.append((matched, name))
     return found
 
 
@@ -68,6 +93,15 @@ def collect_citations(document: Document) -> list[Citation]:
                     pattern_name=pattern_name,
                 )
     return sorted(by_text.values(), key=lambda c: c.text.lower())
+
+
+# [FIX 2] Trailing punctuation that can cling to the last span of a
+# citation. When a sentence ends "...(Smith, 2020)." the tokenizer
+# produces the single span "2020)." which is *not* fully inside the
+# citation range and was therefore counted as a word. Trimming it
+# before the containment check fixes this — and it fixes it for
+# every sentence-final citation in the document.
+_TRAILING_PUNCT = '.,;:!?)]}\'"\u2019\u201d'
 
 
 def apply_citation_exclusions(document: Document) -> None:
@@ -93,8 +127,20 @@ def apply_citation_exclusions(document: Document) -> None:
         for span in block.spans:
             s_start = span.source.char_start
             s_end = span.source.char_end
+
+            # [FIX 2] Trim trailing punctuation before the containment
+            # check. "(Smith, 2020)." -> span "2020)." -> trimmed "2020"
+            # now sits fully inside the citation range.
+            trimmed_end = s_end
+            while (trimmed_end > s_start
+                   and block_text[trimmed_end - 1] in _TRAILING_PUNCT):
+                trimmed_end -= 1
+            # A span that is *entirely* punctuation is not a citation token.
+            if trimmed_end <= s_start:
+                continue
+
             for c_start, c_end, c_source in claimed_ranges:
-                if s_start >= c_start and s_end <= c_end:
+                if s_start >= c_start and trimmed_end <= c_end:
                     span.span_type = SpanType.CITATION
                     span.decision_record = DecisionRecord(
                         decision=Decision.EXCLUDE,
@@ -125,6 +171,9 @@ def find_missed_candidates(document: Document) -> list[str]:
         for m in loose.finditer(block.text):
             matched = m.group(0)
             if matched.lower() in already:
+                continue
+            # [FIX 3b] Don't offer non-author parentheticals to the user.
+            if not _author_is_plausible(matched):
                 continue
             if matched in candidates:
                 continue

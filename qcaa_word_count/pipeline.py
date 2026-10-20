@@ -163,14 +163,45 @@ def run(path: str, *, mode: str = "interactive",
         sections = getattr(document, "_sections_snapshot", [])
         print_diff(save_path, sections, result["total"])
 
-    # ---- Mismatch warning (F8) ---------------------------------------
+        # ---- Mismatch warning (F8) + region sanity check ----------------
     if stated and stated != result["total"]:
         delta = result["total"] - stated
+        pct = abs(delta) / stated * 100 if stated else 0
         print()
         print(yellow(
             f"  ⚠ Title page says \"Word Count: {stated}\"\n"
             f"    Tool calculates {result['total']} "
             f"(differs by {abs(delta):+d})"
+        ))
+        # [FIX 10] A gap of more than 20% is not rounding — it means a
+        # whole region, table, or caption was decided the wrong way.
+        if pct > 20:
+            print()
+            print(yellow(
+                f"  That's a {pct:.0f}% difference. That usually means a "
+                f"whole region,\n"
+                f"  table, or caption was excluded when it shouldn't be "
+                f"(or vice versa).\n"
+                f"  Run with --review to check the ambiguous decisions."
+            ))
+
+    # [FIX 10b] Independent of any stated count: if more than 20% of
+    # blocks are region-excluded, the detector probably fired wrong.
+    # This is what would have caught the title-page bug on the first run.
+    total_blocks = len(document.blocks)
+    excluded_blocks = sum(
+        1 for b in document.blocks
+        if b.region_record.decision == Decision.EXCLUDE
+    )
+    if total_blocks and excluded_blocks / total_blocks > 0.20:
+        pct_blocks = excluded_blocks / total_blocks * 100
+        print()
+        print(yellow(
+            f"  ⚠ {excluded_blocks} of {total_blocks} blocks "
+            f"({pct_blocks:.0f}%) were excluded by region.\n"
+            f"    If that looks wrong, check the 'Regions detected' "
+            f"section of the report\n"
+            f"    or run with --review."
         ))
 
     # ---- Save (before output, so preview shows final state) ----------

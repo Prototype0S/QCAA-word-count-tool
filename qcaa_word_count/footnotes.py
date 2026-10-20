@@ -18,6 +18,14 @@ BIBLIOGRAPHIC_HINTS = (
         re.IGNORECASE,
     ),
     re.compile(r"\bet\s+al\.", re.IGNORECASE),
+    # [FIX 7] Retrieval phrasing is a strong bibliographic signal.
+    # Pushes "Available at http://..." and "Retrieved 5 March 2020"
+    # from AMBIGUOUS up to BIBLIOGRAPHIC.
+    re.compile(
+        r"\b(?:retrieved|available\s+(?:at|from)|last\s+accessed|"
+        r"reprinted|revised)\b",
+        re.IGNORECASE,
+    ),
 )
 
 
