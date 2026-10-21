@@ -26,6 +26,13 @@ APA_PATTERNS: list[tuple[str, re.Pattern]] = [
         r"\(\s*[A-Z][A-Za-z'’\-]+\s*,\s*(?:19|20)\d{2}[a-z]?"
         r"(?:\s*,\s*pp?\.?\s*\d+(?:\s*[-\u2013]\s*\d+)?)?\s*\)"
     )),
+    # [FIX 3c] Tolerant "Author. , year" form. Catches malformed
+    # citations like "(Australian Bureau of Statistics. , 2026)"
+    # which students paste from citation generators.
+    ("simple-loose", re.compile(
+        r"\(\s*[A-Z][A-Za-z'’\-]+(?:\s+[A-Z][A-Za-z'’\-]+){0,5}"
+        r"\s*\.?\s*,\s*(?:19|20)\d{2}[a-z]?\s*\)"
+    )),
     ("corporate", re.compile(
         r"\(\s*[A-Z][A-Za-z'’\-]+(?:\s+[A-Z][A-Za-z'’\-]+){1,6}"
         r"\s*,\s*(?:19|20)\d{2}[a-z]?\s*\)"
@@ -98,9 +105,7 @@ def collect_citations(document: Document) -> list[Citation]:
 # [FIX 2] Trailing punctuation that can cling to the last span of a
 # citation. When a sentence ends "...(Smith, 2020)." the tokenizer
 # produces the single span "2020)." which is *not* fully inside the
-# citation range and was therefore counted as a word. Trimming it
-# before the containment check fixes this — and it fixes it for
-# every sentence-final citation in the document.
+# citation range and was therefore counted as a word.
 _TRAILING_PUNCT = '.,;:!?)]}\'"\u2019\u201d'
 
 
@@ -156,9 +161,14 @@ def apply_citation_exclusions(document: Document) -> None:
 
 
 def find_missed_candidates(document: Document) -> list[str]:
-    """Parentheticals containing a 4-digit year that weren't auto-excluded."""
+    """Parentheticals containing a 4-digit year that weren't auto-excluded.
+
+    Deduplicated by case-insensitive value so the user isn't offered the
+    same string twice.
+    """
     already = {c.text.lower() for c in document.citations}
-    candidates = []
+    candidates: list[str] = []
+    seen: set[str] = set()
     loose = re.compile(
         r"\(\s*[A-Z][A-Za-z'’\-]+[^()]{0,60}?(?:19|20)\d{2}[^()]{0,30}?\)"
     )
@@ -170,13 +180,13 @@ def find_missed_candidates(document: Document) -> list[str]:
             continue
         for m in loose.finditer(block.text):
             matched = m.group(0)
-            if matched.lower() in already:
+            key = matched.lower().strip()
+            if key in already or key in seen:
                 continue
             # [FIX 3b] Don't offer non-author parentheticals to the user.
             if not _author_is_plausible(matched):
                 continue
-            if matched in candidates:
-                continue
+            seen.add(key)
             candidates.append(matched)
     return candidates
 

@@ -164,7 +164,6 @@ _TECH_ADJECTIVES = frozenset({
     "1k", "2k", "3k", "4k", "5k", "8k",
     "5g", "6g",
     "2fa", "3pl", "4pl",
-    "covid19",  # belt and braces; regex ^\d would not match anyway
 })
 
 # [FIX 1c] Compound "number-word-number" forms are words.
@@ -229,9 +228,7 @@ def _contains_bracket(tok: str) -> bool:
 def is_equation_heavy_block(block: Block, threshold: float = 0.55) -> bool:
     # [FIX 4a] Threshold raised 0.40 -> 0.55. A paragraph only has to
     # *dominate* in mathy tokens to trigger equation-heavy heuristics,
-    # not merely contain a minority of them. This stops science prose
-    # like "The 5 kg mass (labelled m) was 2 m from the pivot" from
-    # being classified as equation-heavy.
+    # not merely contain a minority of them.
     if not block.spans:
         return False
     mathy = 0

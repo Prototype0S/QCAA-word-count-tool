@@ -70,6 +70,18 @@ def _print_summary_line(document: Document) -> None:
                    f"({document.drawings_with_text} contain text)"))
 
 
+def _print_region_debug(document: Document) -> None:
+    """[FIX 14] Set QCAA_DEBUG_REGIONS=1 to dump every block's region."""
+    if not os.environ.get("QCAA_DEBUG_REGIONS"):
+        return
+    print()
+    print("Region assignments:")
+    for i, b in enumerate(document.blocks):
+        preview = b.text.strip()[:70].replace("\n", " ")
+        print(f"  {i:>3}  {b.region.value:<12}  {preview}")
+    print()
+
+
 def run(path: str, *, mode: str = "interactive",
         auto_accept: bool = False,
         open_browser: bool = True,
@@ -117,6 +129,7 @@ def run(path: str, *, mode: str = "interactive",
                 print(grey(msg))
 
     _print_summary_line(document)
+    _print_region_debug(document)
 
     # ---- Early-exit modes --------------------------------------------
     if mode == "summary":
@@ -124,9 +137,12 @@ def run(path: str, *, mode: str = "interactive",
         result = count_words(document)
         _snapshot_sections(document, result)
         if save:
-            save_decisions(document, path)
+            # [FIX 15] Pass the total so --check diff works next time.
+            save_decisions(document, path, total=result["total"])
         print()
         print(f"{document.filename}\t{result['total']}")
+        print(grey("  (Fast mode: footnotes counted as body. "
+                   "Use --review for the QCAA-accurate count.)"))
         return 0
 
     if mode == "preview":
@@ -134,7 +150,7 @@ def run(path: str, *, mode: str = "interactive",
         result = count_words(document)
         _snapshot_sections(document, result)
         if save:
-            save_decisions(document, path)
+            save_decisions(document, path, total=result["total"])
         html_file = write_html_preview(
             document, result, output_path=html_path, open_browser=open_browser,
         )
@@ -149,7 +165,6 @@ def run(path: str, *, mode: str = "interactive",
         print()
         resolve_all(document, auto_accept=True)
     else:
-        # Interactive (review) — load-saved decisions suppress prompts
         resolve_all(document, auto_accept=False)
 
     result = count_words(document)
@@ -163,7 +178,7 @@ def run(path: str, *, mode: str = "interactive",
         sections = getattr(document, "_sections_snapshot", [])
         print_diff(save_path, sections, result["total"])
 
-        # ---- Mismatch warning (F8) + region sanity check ----------------
+    # ---- Mismatch warning (F8) + region sanity check -----------------
     if stated and stated != result["total"]:
         delta = result["total"] - stated
         pct = abs(delta) / stated * 100 if stated else 0
@@ -187,7 +202,6 @@ def run(path: str, *, mode: str = "interactive",
 
     # [FIX 10b] Independent of any stated count: if more than 20% of
     # blocks are region-excluded, the detector probably fired wrong.
-    # This is what would have caught the title-page bug on the first run.
     total_blocks = len(document.blocks)
     excluded_blocks = sum(
         1 for b in document.blocks
@@ -206,7 +220,8 @@ def run(path: str, *, mode: str = "interactive",
 
     # ---- Save (before output, so preview shows final state) ----------
     if save:
-        save_decisions(document, path)
+        # [FIX 15] Pass the total so --check diff works next time.
+        save_decisions(document, path, total=result["total"])
 
     # ---- Preview / report -------------------------------------------
     print()

@@ -10,7 +10,7 @@ echo ============================================================
 echo.
 
 REM --- Warn if running from Downloads or a temporary folder ---------
-echo %~dp0 | findstr /i /c:"\\Downloads\\" /c:"\\Temp\\" >nul
+echo %~dp0 | findstr /i /c:"\Downloads\" /c:"\Temp\" >nul
 if %errorlevel% equ 0 (
     echo NOTE: You are running the tool from Downloads or Temp.
     echo       It is better to move the folder somewhere permanent
@@ -18,14 +18,17 @@ if %errorlevel% equ 0 (
     echo.
 )
 
-REM --- Check Python is available and recent enough -------------------
+REM --- Check Python is available -------------------------------------
 where python >nul 2>nul
 if %errorlevel% neq 0 (
     echo ERROR: Python is not installed or not on PATH.
     echo.
-    echo   1. Download Python 3.10+ from https://www.python.org/downloads/
-    echo   2. On the first screen of the installer, tick
-    echo      "Add Python to PATH"
+    echo   RECOMMENDED: Python 3.15 (much faster for this tool)
+    echo   Download:    https://www.python.org/downloads/release/python-3150/
+    echo   Pick:        "Windows installer (64-bit)"
+    echo.
+    echo   1. Run the installer.
+    echo   2. On the first screen, tick "Add Python to PATH".
     echo   3. Then double-click this file again.
     echo.
     pause
@@ -34,12 +37,26 @@ if %errorlevel% neq 0 (
 
 for /f "tokens=2 delims= " %%v in ('python --version 2^>^&1') do set PYVER=%%v
 echo Found Python %PYVER%
+
+REM --- Recommend 3.15, but require 3.10 -------------------------------
 python -c "import sys; sys.exit(0 if sys.version_info >= (3,10) else 1)" >nul 2>nul
 if errorlevel 1 (
     echo ERROR: Python %PYVER% is too old. This tool needs Python 3.10 or newer.
-    echo Install a newer version from https://www.python.org/downloads/
+    echo.
+    echo   RECOMMENDED: Python 3.15 (much faster for this tool)
+    echo   Download:    https://www.python.org/downloads/release/python-3150/
+    echo.
     pause
     exit /b 1
+)
+
+python -c "import sys; sys.exit(0 if sys.version_info >= (3,15) else 1)" >nul 2>nul
+if errorlevel 1 (
+    echo.
+    echo NOTE: You are on Python %PYVER%. The tool works, but 3.15 is
+    echo       noticeably faster. If you want the speedup, upgrade from:
+    echo       https://www.python.org/downloads/release/python-3150/
+    echo.
 )
 
 REM --- Create the virtual environment if needed ----------------------

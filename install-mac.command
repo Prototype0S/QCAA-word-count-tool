@@ -28,12 +28,11 @@ case "$(pwd)" in
 esac
 
 # ---------------------------------------------------------------------------
-# Find a suitable Python (3.10+)
+# Find a suitable Python (3.10+, prefer 3.15)
 # ---------------------------------------------------------------------------
-# On macOS, `python` may be Python 2 on old systems, and `python3` is the
-# safe name. We check python3 first, then fall back to python.
+# Try the newest first so anyone with 3.15 installed gets it automatically.
 PYTHON_BIN=""
-for candidate in python3.13 python3.12 python3.11 python3.10 python3 python; do
+for candidate in python3.15 python3.14 python3.13 python3.12 python3.11 python3.10 python3 python; do
     if command -v "$candidate" >/dev/null 2>&1; then
         if "$candidate" -c "import sys; sys.exit(0 if sys.version_info >= (3,10) else 1)" >/dev/null 2>&1; then
             PYTHON_BIN="$candidate"
@@ -45,12 +44,14 @@ done
 if [ -z "$PYTHON_BIN" ]; then
     echo "ERROR: Python 3.10 or newer was not found."
     echo
-    echo "  1. Download Python 3.10+ from https://www.python.org/downloads/"
-    echo "     (the official macOS installer)"
-    echo "  2. Run the installer — it puts Python in /usr/local/bin automatically"
-    echo "  3. Double-click this file again"
+    echo "  RECOMMENDED: Python 3.15 (much faster for this tool)"
+    echo "  Download:    https://www.python.org/downloads/release/python-3150/"
+    echo "               (pick the macOS installer, 10.15+)"
     echo
-    echo "Alternative (if you use Homebrew): brew install python@3.12"
+    echo "  1. Run the installer."
+    echo "  2. Double-click this file again."
+    echo
+    echo "Alternative (if you use Homebrew): brew install python@3.15"
     echo
     read -n 1 -s -r -p "Press any key to close..."
     echo
@@ -59,6 +60,17 @@ fi
 
 PYVER=$("$PYTHON_BIN" -c "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}')")
 echo "Found Python $PYVER ($PYTHON_BIN)"
+
+# ---------------------------------------------------------------------------
+# Soft-recommend 3.15 (works on 3.10+, faster on 3.15)
+# ---------------------------------------------------------------------------
+if ! "$PYTHON_BIN" -c "import sys; sys.exit(0 if sys.version_info >= (3,15) else 1)" >/dev/null 2>&1; then
+    echo
+    echo "NOTE: You're on Python $PYVER. The tool works, but 3.15 is"
+    echo "      noticeably faster. If you want the speedup, upgrade from:"
+    echo "      https://www.python.org/downloads/release/python-3150/"
+    echo
+fi
 
 # ---------------------------------------------------------------------------
 # Create the virtual environment if needed

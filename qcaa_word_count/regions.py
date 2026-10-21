@@ -20,12 +20,13 @@ SECTION_TRIGGERS = {
     "appendix": "appendix",
     "appendices": "appendix",
     "annex": "appendix",
-    "annexes": "appendix",
-    
 }
 
 
 def detect_regions(document: Document) -> None:
+    # [FIX 8] Walk the opening blocks and stop the TITLE_PAGE region
+    # at the first block that looks like body prose. A Word heading
+    # still ends the title page (as before); so does substantial prose.
     current_region = Region.BODY
     current_level: int | None = None
     in_title_page = True
@@ -33,9 +34,11 @@ def detect_regions(document: Document) -> None:
     for block in document.blocks:
         text = block.text.strip()
 
+        # --- Opening title-page window ---------------------------------
         if in_title_page:
             if block.block_type == BlockType.HEADING:
                 in_title_page = False
+                # fall through to heading handling below
             elif _looks_like_body_prose(text):
                 in_title_page = False
                 block.region = Region.BODY
@@ -45,6 +48,7 @@ def detect_regions(document: Document) -> None:
                 block.region = Region.TITLE_PAGE
                 continue
 
+        # --- Section heading handling ----------------------------------
         if block.block_type == BlockType.HEADING:
             key = text.lower().rstrip(":.-")
             level = heading_level_from_style(block.style_name) or 1
@@ -70,11 +74,16 @@ _STATED_COUNT_LINE_RE = re.compile(
 
 
 def _looks_like_body_prose(text: str) -> bool:
+    """A block is prose if it has two or more sentence endings, or one
+    sentence ending and at least 15 words. Used to end the title-page
+    window early when a document uses bold body paragraphs as pseudo-
+    headings.
+    """
     t = text.strip()
     if not t:
         return False
     if _STATED_COUNT_LINE_RE.search(t):
-        return False
+        return False   # "Word count: 1500" is a title-page line
     sentences = len(_SENTENCE_END_RE.findall(t))
     words = len(t.split())
     if sentences >= 2:
@@ -88,6 +97,11 @@ _APA_AUTHOR_START_RE = re.compile(
     r"^\s*[A-Z][A-Za-z'’\-]+(?:\s*,\s*[A-Z]\.?)+\s*\(\s*(?:19|20)\d{2}[a-z]?\s*\)",
 )
 
+# [FIX 12a] Student-format author (year) at the start of a block.
+#   Australian Bureau of Statistics (2026). ...
+#   Smith (2020). The title. ...
+#   Smith and Jones (2020). ...
+#   Smith, J., & Jones, B. (2020). ...
 _REFERENCE_AUTHOR_YEAR_RE = re.compile(
     r"^\s*[A-Z][A-Za-z'’\-]+"
     r"(?:\s*,\s*[A-Z]\.?)?"
@@ -122,6 +136,11 @@ def _looks_like_reference(text: str) -> bool:
     Principle: when in doubt, treat as a reference. A missed reference
     entry costs 30-80 words; a wrongly-excluded prose paragraph costs
     maybe 20. Bias toward exclusion.
+
+    [FIX 12c] The sentence-ending guard is *only* applied in the
+    no-URL branch, and only when a year+hint pair is present. Reference
+    entries routinely contain 4-6 periods (page ranges, "[Data set].",
+    stray punctuation) so an unconditional guard rejects them.
     """
     text = text.strip()
     if not text:
@@ -131,8 +150,8 @@ def _looks_like_reference(text: str) -> bool:
     if _URL_LIKE_RE.search(text):
         url_starts = len(_URL_START_RE.findall(text))
         sentences = len(_SENTENCE_END_RE.findall(text))
-        # Two or more URLs — this is a reference list, accept
-        # unconditionally (covers the "all entries in one block" case).
+        # Two or more URLs — treat as reference unconditionally.
+        # Covers the "pasted whole reference list as one paragraph" case.
         if url_starts >= 2:
             return True
         # One URL and a compact block — reference entry.
@@ -140,7 +159,6 @@ def _looks_like_reference(text: str) -> bool:
         # periods inside an entry don't disqualify it.
         if sentences <= 6:
             return True
-        # One URL in a long prose block — reject.
         return False
 
     # --- No URL: rely on author/year patterns ------------------------
@@ -153,7 +171,7 @@ def _looks_like_reference(text: str) -> bool:
     has_hint = bool(_REFERENCE_HINT_RE.search(text))
     if has_year and has_hint:
         # Year + bibliographic keyword, no URL. Apply a sentence
-        # guard here only — without a URL this is a weaker signal.
+        # guard only here — without a URL this is a weaker signal.
         if len(_SENTENCE_END_RE.findall(text)) > 4:
             return False
         return True
@@ -162,7 +180,12 @@ def _looks_like_reference(text: str) -> bool:
 
 
 def _detect_trailing_references(document: Document) -> None:
-    """Mark consecutive reference-like blocks at the end of the body."""
+    """Mark consecutive reference-like blocks at the end of the body.
+
+    Walks backwards and stops at the first non-reference once it has
+    started, so a 40-entry reference list is caught in full. A single
+    stray reference-like block is not marked (needs >= 2).
+    """
     body_blocks = [b for b in document.blocks if b.region == Region.BODY]
     if not body_blocks:
         return
@@ -189,6 +212,10 @@ def _detect_trailing_references(document: Document) -> None:
 
 
 def apply_regional_decisions(document: Document) -> None:
+    """Assign a decision record to each block based on its region.
+
+    Preserves manual overrides on re-runs.
+    """
     for block in document.blocks:
         if block.region_record.source == "manual":
             continue

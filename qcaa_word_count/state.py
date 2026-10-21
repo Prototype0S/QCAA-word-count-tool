@@ -1,15 +1,4 @@
-"""Save and load decisions across runs.
-
-The goal is: after the user answers every prompt once, a second run on
-the same document (even after edits) should skip the prompts whose
-decisions are still valid. We match by (block_index, text_hash) so
-that inserting paragraphs before a table shifts the index, but the
-table's text hash still matches.
-
-IMPORTANT: when a table answer is restored, `apply_table_answer` must be
-called so the table's *spans* get their decisions. Otherwise the count
-drops because spans default to UNDECIDED.
-"""
+"""Save and load decisions across runs."""
 from __future__ import annotations
 
 import hashlib
@@ -19,7 +8,7 @@ from pathlib import Path
 from typing import Optional
 
 from .model import (
-    Block, Decision, DecisionRecord, Document, Table, TableAnswer,
+    Block, Citation, Decision, DecisionRecord, Document, Table, TableAnswer,
 )
 from .tables import apply_table_answer
 
@@ -89,6 +78,12 @@ def save_decisions(document: Document, docx_path: str,
             "answer": fn.answer,
         })
 
+    # [FIX 13] Persist manually-added citations so they survive re-runs.
+    citations_manual = [
+        {"text": c.text, "occurrences": c.occurrences}
+        for c in document.citations if c.source == "manual"
+    ]
+
     payload = {
         "version": SAVE_VERSION,
         "filename": document.filename,
@@ -97,6 +92,7 @@ def save_decisions(document: Document, docx_path: str,
         "blocks": blocks,
         "tables": tables,
         "footnotes": footnotes,
+        "citations_manual": citations_manual,     # [FIX 13]
         "sections": getattr(document, "_sections_snapshot", []),
     }
 
@@ -108,10 +104,7 @@ def save_decisions(document: Document, docx_path: str,
 
 
 def load_decisions(document: Document, load_path: str) -> dict:
-    """Restore decisions from JSON where they still match.
-
-    Returns a dict with 'restored', 'skipped', 'mismatched', 'loaded'.
-    """
+    """Restore decisions from JSON where they still match."""
     stats = {"restored": 0, "skipped": 0, "mismatched": 0, "loaded": False}
 
     try:
@@ -167,8 +160,6 @@ def load_decisions(document: Document, load_path: str) -> dict:
             continue
         table.answer = answer
         # CRITICAL: re-apply so the table's spans get their decisions.
-        # Restoring table.answer alone leaves the spans UNDECIDED, which
-        # makes the table count as 0 in count_words.
         apply_table_answer(
             table, answer,
             reason="Restored from saved decisions",
@@ -192,6 +183,16 @@ def load_decisions(document: Document, load_path: str) -> dict:
             continue
         fn.answer = answer
         stats["restored"] += 1
+
+    # [FIX 13] Restore manual citations. These are appended to the
+    # list produced by collect_citations(); apply_citation_exclusions
+    # will then pick them up when it runs later in the pipeline.
+    for saved in payload.get("citations_manual", []):
+        document.citations.append(Citation(
+            text=saved["text"],
+            occurrences=saved.get("occurrences", 0),
+            source="manual",
+        ))
 
     return stats
 

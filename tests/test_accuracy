@@ -1,0 +1,248 @@
+"""Regression tests for every accuracy fix in this conversation.
+
+Run with: python -m pytest tests/test_accuracy.py -v
+"""
+from __future__ import annotations
+
+import json
+from pathlib import Path
+
+import pytest
+
+from qcaa_word_count.citations import (
+    _author_is_plausible,
+    find_apa_citations,
+)
+from qcaa_word_count.helpers import (
+    classify_span,
+    is_equation_token,
+    is_number_unit_token,
+)
+from qcaa_word_count.model import (
+    Block, BlockType, Citation, Decision, Document, Region, SourceLocation, Span,
+)
+from qcaa_word_count.regions import (
+    _looks_like_body_prose,
+    _looks_like_reference,
+)
+
+
+# ---------------------------------------------------------------------------
+# FIX 1 — ordinals and tech-adjectives are words
+# ---------------------------------------------------------------------------
+
+class TestOrdinals:
+    def test_ordinals_are_not_number_units(self):
+        for tok in ("1st", "2nd", "3rd", "4th", "10th", "21st"):
+            assert not is_number_unit_token(tok), tok
+
+    def test_tech_adjectives_are_not_number_units(self):
+        for tok in ("3D", "4K", "5G", "2FA"):
+            assert not is_number_unit_token(tok), tok
+
+    def test_real_units_are_still_number_units(self):
+        for tok in ("5kg", "100km", "2mL", "37°C"):
+            assert is_number_unit_token(tok), tok
+
+
+class TestCompoundNumbers:
+    def test_compound_numbers_are_not_equations(self):
+        for tok in ("1-to-1", "2-in-1", "3-on-3", "1-by-1"):
+            assert not is_equation_token(tok), tok
+
+
+# ---------------------------------------------------------------------------
+# FIX 2 — citation trailing punctuation
+# ---------------------------------------------------------------------------
+
+class TestCitationPunctuation:
+    def _make_doc(self, text: str) -> Document:
+        doc = Document(filename="test.docx")
+        block = Block(block_type=BlockType.PARAGRAPH, block_index=0)
+        block.raw_text = text
+        from qcaa_word_count.helpers import make_spans_for_text
+        block.spans = make_spans_for_text(text, block_index=0)
+        block.region = Region.BODY
+        doc.blocks.append(block)
+        return doc
+
+    def test_sentence_final_citation_fully_excluded(self):
+        from qcaa_word_count.citations import apply_citation_exclusions
+        doc = self._make_doc("Some text (Smith, 2020).")
+        doc.citations = [Citation(text="(Smith, 2020)", source="auto")]
+        apply_citation_exclusions(doc)
+        # Every span in "(Smith, 2020)." should be excluded
+        counts = [s for s in doc.blocks[0].spans
+                  if s.decision_record.decision == Decision.COUNT]
+        counted_words = [s.text for s in counts]
+        assert "(Smith," not in counted_words
+        assert "2020)." not in counted_words
+
+    def test_citation_mid_sentence_fully_excluded(self):
+        from qcaa_word_count.citations import apply_citation_exclusions
+        doc = self._make_doc("As (Smith, 2020) argued.")
+        doc.citations = [Citation(text="(Smith, 2020)", source="auto")]
+        apply_citation_exclusions(doc)
+        counted = [s.text for s in doc.blocks[0].spans
+                   if s.decision_record.decision == Decision.COUNT]
+        assert "(Smith," not in counted
+        assert "2020)" not in counted
+
+
+# ---------------------------------------------------------------------------
+# FIX 3 — non-author surnames aren't citations
+# ---------------------------------------------------------------------------
+
+class TestNonAuthorCitation:
+    def test_figure_year_not_a_citation(self):
+        assert find_apa_citations("(Figure, 2020)") == []
+
+    def test_table_year_not_a_citation(self):
+        assert find_apa_citations("(Table, 2019)") == []
+
+    def test_smith_year_is_a_citation(self):
+        result = find_apa_citations("(Smith, 2020)")
+        assert len(result) == 1
+        assert result[0][0] == "(Smith, 2020)"
+
+    def test_corporate_multiword_is_a_citation(self):
+        result = find_apa_citations("(Australian Bureau of Statistics, 2026)")
+        assert len(result) == 1
+
+    def test_malformed_period_comma_is_a_citation(self):
+        # [FIX 3c] tolerant pattern
+        result = find_apa_citations("(Australian Bureau of Statistics. , 2026)")
+        assert len(result) == 1
+
+
+# ---------------------------------------------------------------------------
+# FIX 4 — equation-heavy heuristics
+# ---------------------------------------------------------------------------
+
+class TestEquationHeavyBrackets:
+    def _make_span(self, text: str) -> Span:
+        return Span(text=text, source=SourceLocation(0, 0, len(text)))
+
+    def test_prose_bracket_in_equation_heavy_is_word(self):
+        # "(labelled" has no mathy inner — should count
+        _, rec = classify_span("(labelled", equation_heavy=True)
+        assert rec.decision == Decision.COUNT
+
+    def test_numeric_bracket_in_equation_heavy_is_equation(self):
+        _, rec = classify_span("(3.5)", equation_heavy=True)
+        assert rec.decision == Decision.EXCLUDE
+
+    def test_single_letter_bracket_in_equation_heavy_is_equation(self):
+        _, rec = classify_span("(m)", equation_heavy=True)
+        assert rec.decision == Decision.EXCLUDE
+
+
+# ---------------------------------------------------------------------------
+# FIX 6/12 — reference-list detection
+# ---------------------------------------------------------------------------
+
+class TestReferenceDetection:
+    def test_apa_entry(self):
+        assert _looks_like_reference("Smith, J. (2020). The title. CUP.")
+
+    def test_author_year_entry(self):
+        assert _looks_like_reference("Smith (2020). A report.")
+
+    def test_author_and_year_entry(self):
+        assert _looks_like_reference("Smith and Jones (2020). A report.")
+
+    def test_organisation_year_entry(self):
+        assert _looks_like_reference(
+            "Australian Bureau of Statistics (2026). National population estimate."
+        )
+
+    def test_url_entry(self):
+        assert _looks_like_reference(
+            "Retrieved 20 October 2026, from https://example.com/report.pdf"
+        )
+
+    def test_entry_with_stray_period(self):
+        # [FIX 12c] the specific case that broke the reference list
+        assert _looks_like_reference(
+            "Australian Bureau of Statistics. . (2026). Quarterly estimates "
+            "[Data set]. . https://dataexplorer.abs.gov.au/vis?tm=Quarterly"
+        )
+
+    def test_entry_with_data_set_period(self):
+        assert _looks_like_reference(
+            "Australian Bureau of Statistics. (2026). Quarterly estimates "
+            "[Data set]. https://dataexplorer.abs.gov.au/"
+        )
+
+    def test_long_prose_with_url_is_not_reference(self):
+        assert not _looks_like_reference(
+            "In 2020 the Reserve Bank published a report on the state of the "
+            "economy. It found that growth had slowed significantly. This was "
+            "confirmed by subsequent analysis. The pattern continued into the "
+            "following year. Economists remain divided on the causes. "
+            "https://example.com/paper"
+        )
+
+    def test_prose_with_year_and_journal_hint_is_not_reference(self):
+        assert not _looks_like_reference(
+            "In 2020 the Journal of Economics published a study. The findings "
+            "were significant. Further work is needed. This was confirmed. "
+            "The pattern continued."
+        )
+
+
+# ---------------------------------------------------------------------------
+# FIX 8 — title-page prose detector
+# ---------------------------------------------------------------------------
+
+class TestTitlePageProse:
+    def test_short_title_is_not_prose(self):
+        assert not _looks_like_body_prose("Hour Maker")
+
+    def test_byline_is_not_prose(self):
+        assert not _looks_like_body_prose("A Business Pitch By Edward Carroll")
+
+    def test_stated_count_line_is_not_prose(self):
+        assert not _looks_like_body_prose("Word Count: 1500")
+
+    def test_two_sentences_is_prose(self):
+        assert _looks_like_body_prose(
+            "What am I trying to make? An app to help young students."
+        )
+
+    def test_one_long_sentence_is_prose(self):
+        assert _looks_like_body_prose(
+            "I chose the name Hour Maker as it captures the core idea of the "
+            "business to help young people."
+        )
+
+
+# ---------------------------------------------------------------------------
+# FIX 13 — manual citations survive save/load round trip
+# ---------------------------------------------------------------------------
+
+class TestCitationPersistence:
+    def test_manual_citations_survive_round_trip(self, tmp_path):
+        from qcaa_word_count.state import load_decisions, save_decisions
+        doc = Document(filename="test.docx")
+        doc.citations = [Citation(text="(ABS, 2026)", source="manual")]
+        save_path = str(tmp_path / "state.json")
+        save_decisions(doc, "fake.docx", save_path=save_path, total=100)
+
+        doc2 = Document(filename="test.docx")
+        load_decisions(doc2, save_path)
+        assert any(
+            c.text == "(ABS, 2026)" and c.source == "manual"
+            for c in doc2.citations
+        )
+
+
+# ---------------------------------------------------------------------------
+# Sanity check: the tokeniser itself
+# ---------------------------------------------------------------------------
+
+def test_tokenize_splits_on_whitespace_only():
+    from qcaa_word_count.helpers import tokenize
+    assert tokenize("Hello, world (Smith, 2020).") == [
+        "Hello,", "world", "(Smith,", "2020)."
+    ]
