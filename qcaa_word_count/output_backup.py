@@ -152,6 +152,18 @@ def print_report(document: Document, result: dict) -> None:
                 sample_str = "  " + grey("(" + ", ".join(parts) + ")")
             print(f"  {col(key):<40} {count:>5} word(s){sample_str}")
         print()
+    # after the buckets block
+    regions_seen = {}
+    for b in document.blocks:
+        regions_seen[b.region.value] = regions_seen.get(b.region.value, 0) + 1
+    if any(r != "body" for r in regions_seen):
+        print(bold("Regions detected:"))
+        for name in sorted(regions_seen):
+            n = regions_seen[name]
+            marker = green if name == "body" else red if name in (
+                "title_page", "references", "contents", "abstract") else yellow
+            print(f"  {marker(name):<16} {n:>4} block(s)")
+        print()
 
     if result.get("tables"):
         print(bold("Tables:"))
@@ -532,7 +544,18 @@ summary {{ cursor:pointer; color:var(--cyan); font-weight:500; }}
 <div class="toolbar">
   <button id="theme-btn" type="button">🌙 Dark mode</button>
   <button id="copy-btn" type="button">📋 Copy summary</button>
+  <button id="reset-btn" type="button" title="Undo all your toggles">↺ Reset toggles</button>
+  <button id="save-overrides-btn" type="button" title="Download a JSON file of your changes">💾 Save overrides</button>
   <button type="button" onclick="window.print()">🖨️ Print / Save PDF</button>
+  <span id="override-status" style="align-self:center; font-size:.85rem; color:var(--grey);"></span>
+</div>
+
+<div class="panel" style="padding:.75rem 1rem;">
+  <strong>Interactive mode</strong> — click any coloured word to toggle whether it counts.
+  The counter above updates live. When you're happy, click
+  <em>💾 Save overrides</em> and the browser will download a small JSON file.
+  Run <code>python qcaa_word_count.py "yourfile.docx" --apply-overrides qcaa_overrides.json</code>
+  (or drag the JSON next to your .docx) to apply your changes.
 </div>
 
 <div class="legend">
@@ -586,48 +609,49 @@ every decision.</p>
 </div>
 
 <script>
-(function() {{
+(function() {
+  // ---------- Theme ----------
   const themeBtn = document.getElementById('theme-btn');
   const saved = localStorage.getItem('qcaa-theme');
-  if (saved === 'dark') {{
+  if (saved === 'dark') {
     document.body.classList.add('dark');
     themeBtn.textContent = '☀️ Light mode';
-  }}
-  themeBtn.addEventListener('click', () => {{
+  }
+  themeBtn.addEventListener('click', () => {
     const dark = document.body.classList.toggle('dark');
     themeBtn.textContent = dark ? '☀️ Light mode' : '🌙 Dark mode';
     localStorage.setItem('qcaa-theme', dark ? 'dark' : 'light');
-  }});
+  });
 
+  // ---------- Copy summary ----------
   const copyBtn = document.getElementById('copy-btn');
   const summary = {summary_json};
-  copyBtn.addEventListener('click', async () => {{
-    try {{
+  copyBtn.addEventListener('click', async () => {
+    try {
       await navigator.clipboard.writeText(summary);
       copyBtn.textContent = '✅ Copied!';
       copyBtn.classList.add('copied');
-      setTimeout(() => {{
+      setTimeout(() => {
         copyBtn.textContent = '📋 Copy summary';
         copyBtn.classList.remove('copied');
-      }}, 1500);
-    }} catch (e) {{
+      }, 1500);
+    } catch (e) {
       copyBtn.textContent = '❌ Copy failed';
-    }}
-  }});
+    }
+  });
 
+  // ---------- Tooltip ----------
   const tooltip = document.getElementById('tooltip');
   const tooltipText = document.getElementById('tooltip-text');
   const tooltipDecision = document.getElementById('tooltip-decision');
   const tooltipRule = document.getElementById('tooltip-rule');
   const tooltipReason = document.getElementById('tooltip-reason');
 
-  document.addEventListener('click', (e) => {{
+  document.addEventListener('click', (e) => {
     const t = e.target;
-    if (!t.matches || !t.matches('span.count, span.exclude, span.citation, span.flag, span.unit')) {{
-      return;
-    }}
-    if (!t.hasAttribute('data-rule')) return;
-
+    if (!t.matches || !t.matches('span.span-toggle')) return;
+    // If this is the override mode (Shift held), toggle instead of tooltip
+    if (e.shiftKey) return;
     tooltipText.textContent = '"' + t.textContent + '"';
     tooltipDecision.textContent = t.getAttribute('data-decision') || '(none)';
     tooltipRule.textContent = t.getAttribute('data-rule') || '(none)';
@@ -644,21 +668,180 @@ every decision.</p>
     tooltip.style.left = left + 'px';
     tooltip.classList.add('visible');
     e.stopPropagation();
-  }});
+  });
 
-  document.addEventListener('click', (e) => {{
-    if (!tooltip.contains(e.target)) {{
-      tooltip.classList.remove('visible');
-    }}
-  }}, true);
-
-  window.hideTooltip = function() {{
-    tooltip.classList.remove('visible');
-  }};
-  document.addEventListener('keydown', (e) => {{
+  document.addEventListener('click', (e) => {
+    if (!tooltip.contains(e.target)) tooltip.classList.remove('visible');
+  }, true);
+  window.hideTooltip = function() { tooltip.classList.remove('visible'); };
+  document.addEventListener('keydown', (e) => {
     if (e.key === 'Escape') hideTooltip();
-  }});
-}})();
+  });
+
+  // ---------- Interactive toggle ----------
+  // Every word that could count (or be excluded) has class `span-toggle`.
+  // Clicking (without shift) shows the tooltip. Ctrl/Cmd+click toggles.
+  // Alt-click reverts a single word to its original state.
+  // The total in the FINAL WORD COUNT panel updates live.
+  const STORAGE_KEY = 'qcaa-overrides-' + location.pathname;
+  const originalTotal = {total};
+  const overrides = new Map();  // key = data-text, value = 'count' | 'exclude'
+
+  // Restore any overrides saved in localStorage from a prior session
+  try {
+    const savedJson = localStorage.getItem(STORAGE_KEY);
+    if (savedJson) {
+      const parsed = JSON.parse(savedJson);
+      for (const [k, v] of Object.entries(parsed)) overrides.set(k, v);
+      applyAllOverrides();
+    }
+  } catch (e) { /* ignore */ }
+
+  function applyAllOverrides() {
+    document.querySelectorAll('span.span-toggle').forEach(el => {
+      const key = el.getAttribute('data-text');
+      if (!overrides.has(key)) return;
+      const want = overrides.get(key);
+      const wasExcluded = el.classList.contains('exclude') || el.classList.contains('citation');
+      if (want === 'count' && wasExcluded) {
+        el.classList.remove('exclude', 'citation');
+        el.classList.add('count');
+      } else if (want === 'exclude' && !wasExcluded) {
+        el.classList.remove('count', 'unit');
+        el.classList.add('exclude');
+      }
+    });
+    updateTotal();
+  }
+
+  function updateTotal() {
+    // Count: spans with class `count` or `unit` that are NOT overrides to exclude
+    let total = 0;
+    document.querySelectorAll('span.span-toggle').forEach(el => {
+      const key = el.getAttribute('data-text');
+      const override = overrides.get(key);
+      const inCounted = el.classList.contains('count') || el.classList.contains('unit');
+      if (override === 'count') total += 1;
+      else if (override === 'exclude') { /* don't add */ }
+      else if (inCounted) total += 1;
+    });
+    const totalEl = document.querySelector('.final-count');
+    if (totalEl) {
+      const delta = total - originalTotal;
+      const sign = delta > 0 ? '+' : (delta < 0 ? '' : '±');
+      const colour = delta === 0 ? '' : (delta > 0 ? ' style="color:var(--green)"'
+                                                    : ' style="color:var(--red)"');
+      totalEl.innerHTML = total +
+        '<small>words' +
+        (delta === 0 ? '' : ' <span' + colour + '>(' + sign + delta + ')</span>') +
+        '</small>';
+    }
+    const status = document.getElementById('override-status');
+    if (status) {
+      status.textContent = overrides.size === 0
+        ? ''
+        : overrides.size + ' override' + (overrides.size === 1 ? '' : 's');
+    }
+  }
+
+  document.addEventListener('click', (e) => {
+    const t = e.target;
+    if (!t.matches || !t.matches('span.span-toggle')) return;
+    // Ctrl/Cmd-click: toggle
+    if (e.ctrlKey || e.metaKey) {
+      e.preventDefault();
+      const key = t.getAttribute('data-text');
+      const isCounted = t.classList.contains('count') || t.classList.contains('unit');
+      if (isCounted) {
+        overrides.set(key, 'exclude');
+        t.classList.remove('count', 'unit');
+        t.classList.add('exclude');
+      } else {
+        overrides.set(key, 'count');
+        t.classList.remove('exclude', 'citation');
+        t.classList.add('count');
+      }
+      updateTotal();
+      return;
+    }
+    // Alt-click: revert one word
+    if (e.altKey) {
+      e.preventDefault();
+      const key = t.getAttribute('data-text');
+      overrides.delete(key);
+      location.reload();
+      return;
+    }
+  });
+
+  // Ctrl+A is "select all" in browsers — don't hijack it. Toggle-all via
+  // the reset button plus the save button. Fine.
+
+  // ---------- Reset button ----------
+  const resetBtn = document.getElementById('reset-btn');
+  if (resetBtn) {
+    resetBtn.addEventListener('click', () => {
+      if (overrides.size === 0) return;
+      if (!confirm('Reset all ' + overrides.size + ' toggle(s)?')) return;
+      overrides.clear();
+      localStorage.removeItem(STORAGE_KEY);
+      location.reload();
+    });
+  }
+
+  // ---------- Save overrides button ----------
+  const saveBtn = document.getElementById('save-overrides-btn');
+  if (saveBtn) {
+    saveBtn.addEventListener('click', () => {
+      // Group overrides by text so we can write {text: count|exclude}
+      const payload = {};
+      for (const [text, decision] of overrides.entries()) {
+        payload[text] = decision;
+      }
+      const blob = new Blob(
+        [JSON.stringify({ overrides: payload, total: currentTotal() }, null, 2)],
+        { type: 'application/json' }
+      );
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = 'qcaa_overrides.json';
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+      saveBtn.textContent = '✅ Downloaded';
+      setTimeout(() => { saveBtn.textContent = '💾 Save overrides'; }, 2000);
+    });
+  }
+
+  function currentTotal() {
+    // Sum every counted span after applying overrides
+    let total = 0;
+    document.querySelectorAll('span.span-toggle').forEach(el => {
+      const key = el.getAttribute('data-text');
+      const override = overrides.get(key);
+      const inCounted = el.classList.contains('count') || el.classList.contains('unit');
+      if (override === 'count') total += 1;
+      else if (override === 'exclude') { /* don't add */ }
+      else if (inCounted) total += 1;
+    });
+    return total;
+  }
+
+  // Persist overrides to localStorage on every change so a refresh
+  // doesn't lose work.
+  const origUpdate = updateTotal;
+  // Simple wrapper: write after each mutation
+  document.addEventListener('click', () => {
+    try {
+      localStorage.setItem(
+        STORAGE_KEY,
+        JSON.stringify(Object.fromEntries(overrides))
+      );
+    } catch (e) { /* ignore */ }
+  }, true);
+})();
 </script>
 
 </body></html>
@@ -673,19 +856,25 @@ def _span_html(span: Span) -> str:
     dec_attr = html.escape(dec.value if hasattr(dec, "value") else str(dec))
     rule_attr = html.escape(rule)
     reason_attr = html.escape(reason)
-    meta = (f' data-decision="{dec_attr}" data-rule="{rule_attr}" '
-            f'data-reason="{reason_attr}"')
+    # data-text lets the JS toggle find the exact token to override
+    text_attr = html.escape(span.text)
+    meta = (
+        f' data-decision="{dec_attr}"'
+        f' data-rule="{rule_attr}"'
+        f' data-reason="{reason_attr}"'
+        f' data-text="{text_attr}"'
+    )
 
     if dec == Decision.COUNT:
         if span.span_type == SpanType.UNIT:
-            return f'<span class="unit"{meta}>{text}</span>'
-        return f'<span class="count"{meta}>{text}</span>'
+            return f'<span class="unit span-toggle"{meta}>{text}</span>'
+        return f'<span class="count span-toggle"{meta}>{text}</span>'
     if dec == Decision.EXCLUDE:
         if rule == "I-CITATION":
-            return f'<span class="citation"{meta}>{text}</span>'
-        return f'<span class="exclude"{meta}>{text}</span>'
+            return f'<span class="citation span-toggle"{meta}>{text}</span>'
+        return f'<span class="exclude span-toggle"{meta}>{text}</span>'
     if dec in (Decision.FLAG, Decision.UNDECIDED):
-        return f'<span class="flag"{meta}>{text}</span>'
+        return f'<span class="flag span-toggle"{meta}>{text}</span>'
     return text
 
 
@@ -963,18 +1152,6 @@ def build_html_preview(document: Document, result: dict) -> str:
 
     summary_text = _build_summary_text(document, result)
 
-    # Stated-count mismatch banner
-    banner_html = ""
-    stated = result.get("stated_count")
-    if stated and stated != result["total"]:
-        delta = result["total"] - stated
-        banner_html = (
-            f'<div class="mismatch-banner">'
-            f'⚠ Title page says "Word Count: {stated}" &middot; '
-            f'Tool calculates <strong>{result["total"]}</strong> '
-            f'(differs by {abs(delta)})'
-            f'</div>'
-        )
         
         
     return _HTML_TEMPLATE.format(
@@ -985,7 +1162,7 @@ def build_html_preview(document: Document, result: dict) -> str:
         statistics_html=statistics_html,
         body_html=body_html,
         additional_panels=additional,
-        summary_json=json.dumps(summary_text),
+        summary_json=json.dumps(summary_text).replace("</", "<\\/"),
     )
 
 

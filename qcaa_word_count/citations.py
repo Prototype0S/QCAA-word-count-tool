@@ -5,12 +5,37 @@ import re
 
 from .model import Citation, Decision, DecisionRecord, Document, Region, SpanType
 
+# ---------------------------------------------------------------------------
+# Patterns
+# ---------------------------------------------------------------------------
+
+# Ordered most-specific to least-specific. The claim-check in
+# find_apa_citations relies on this order: a broader pattern will not
+# claim a range that a narrower pattern already claimed.
 APA_PATTERNS: list[tuple[str, re.Pattern]] = [
+    # (Smith, 2020, p. 45) — with page numbers
     ("with page numbers", re.compile(
         r"\(\s*[A-Z][A-Za-z'’\-]+(?:\s+(?:&|and)\s+[A-Z][A-Za-z'’\-]+)?"
         r"(?:\s+et\s+al\.?)?\s*,\s*(?:19|20)\d{2}[a-z]?"
         r"\s*,\s*pp?\.?\s*\d+(?:\s*[-\u2013]\s*\d+)?\s*\)"
     )),
+
+    # [FIX 1] Multi-citation: (Smith, 2020; Jones, 2021)
+    # Must appear BEFORE "simple", otherwise "simple" claims the first
+    # half of the multi-citation and blocks the full match.
+    ("multi-citation", re.compile(
+        r"\(\s*[A-Z][A-Za-z'’\-]+"
+        r"(?:\s+(?:&|and)\s+[A-Z][A-Za-z'’\-]+)?"
+        r"(?:\s+et\s+al\.?)?\s*,\s*(?:19|20)\d{2}[a-z]?"
+        r"(?:\s*,\s*pp?\.?\s*\d+(?:\s*[-\u2013]\s*\d+)?)?"
+        r"(?:\s*;\s*[A-Z][A-Za-z'’\-]+"
+        r"(?:\s+(?:&|and)\s+[A-Z][A-Za-z'’\-]+)?"
+        r"(?:\s+et\s+al\.?)?\s*,\s*(?:19|20)\d{2}[a-z]?"
+        r"(?:\s*,\s*pp?\.?\s*\d+(?:\s*[-\u2013]\s*\d+)?)?)+"
+        r"\s*\)"
+    )),
+
+    # (Smith & Jones, 2020) — multi-author, comma before year
     ("multi-author", re.compile(
         r"\(\s*[A-Z][A-Za-z'’\-]+"
         r"(?:\s*(?:,|&|and)\s*[A-Z][A-Za-z'’\-]+)+"
@@ -18,14 +43,30 @@ APA_PATTERNS: list[tuple[str, re.Pattern]] = [
         r"\s*,\s*(?:19|20)\d{2}[a-z]?"
         r"(?:\s*,\s*pp?\.?\s*\d+(?:\s*[-\u2013]\s*\d+)?)?\s*\)"
     )),
+
+    # (Smith et al., 2020)
     ("et-al", re.compile(
         r"\(\s*[A-Z][A-Za-z'’\-]+\s+et\s+al\.?\s*,\s*(?:19|20)\d{2}[a-z]?"
         r"(?:\s*,\s*pp?\.?\s*\d+(?:\s*[-\u2013]\s*\d+)?)?\s*\)"
     )),
+
+    # [FIX 2] (Smith, n.d.) — APA "no date" form.
+    # Must appear BEFORE "simple" so it isn't shadowed by the year
+    # requirement (which "simple" doesn't satisfy either, so ordering
+    # here is mostly for readability, but placing it before "simple"
+    # is defensive against future edits).
+    ("no-date", re.compile(
+        r"\(\s*[A-Z][A-Za-z'’\-]+"
+        r"(?:\s+(?:&|and)\s+[A-Z][A-Za-z'’\-]+)?"
+        r"(?:\s+et\s+al\.?)?\s*,\s*n\.?\s*d\.?\s*\)"
+    )),
+
+    # (Smith, 2020)
     ("simple", re.compile(
         r"\(\s*[A-Z][A-Za-z'’\-]+\s*,\s*(?:19|20)\d{2}[a-z]?"
         r"(?:\s*,\s*pp?\.?\s*\d+(?:\s*[-\u2013]\s*\d+)?)?\s*\)"
     )),
+
     # [FIX 3c] Tolerant "Author. , year" form. Catches malformed
     # citations like "(Australian Bureau of Statistics. , 2026)"
     # which students paste from citation generators.
@@ -33,10 +74,14 @@ APA_PATTERNS: list[tuple[str, re.Pattern]] = [
         r"\(\s*[A-Z][A-Za-z'’\-]+(?:\s+[A-Z][A-Za-z'’\-]+){0,5}"
         r"\s*\.?\s*,\s*(?:19|20)\d{2}[a-z]?\s*\)"
     )),
+
+    # (Australian Bureau of Statistics, 2026) — multi-word corporate
     ("corporate", re.compile(
         r"\(\s*[A-Z][A-Za-z'’\-]+(?:\s+[A-Z][A-Za-z'’\-]+){1,6}"
         r"\s*,\s*(?:19|20)\d{2}[a-z]?\s*\)"
     )),
+
+    # Smith (2020) — narrative form
     ("narrative", re.compile(
         r"\b[A-Z][A-Za-z'’\-]+"
         r"(?:\s+(?:and|&)\s+[A-Z][A-Za-z'’\-]+|\s+et\s+al\.?)?"
@@ -44,8 +89,7 @@ APA_PATTERNS: list[tuple[str, re.Pattern]] = [
     )),
 ]
 
-# [FIX 3] Words that look like author surnames but aren't. Prevents
-# "(Figure, 2020)" and "(Note, 2020)" from being excluded as citations.
+# [FIX 3] Words that look like author surnames but aren't.
 _NON_AUTHOR_WORDS = frozenset({
     "figure", "fig", "figs", "table", "tbl", "tables",
     "section", "sect", "chapter", "ch", "part", "appendix", "app",
@@ -72,10 +116,11 @@ def find_apa_citations(text: str) -> list[tuple[str, str]]:
     for name, pattern in APA_PATTERNS:
         for m in pattern.finditer(text):
             start, end = m.span()
+            # A range that overlaps a claimed range is a shadow match
+            # (usually a shorter pattern inside a longer one). Skip.
             if any(s < end and start < e for s, e in claimed):
                 continue
             matched = m.group(0)
-            # [FIX 3] reject non-author "surnames"
             if not _author_is_plausible(matched):
                 continue
             claimed.append((start, end))
@@ -102,10 +147,7 @@ def collect_citations(document: Document) -> list[Citation]:
     return sorted(by_text.values(), key=lambda c: c.text.lower())
 
 
-# [FIX 2] Trailing punctuation that can cling to the last span of a
-# citation. When a sentence ends "...(Smith, 2020)." the tokenizer
-# produces the single span "2020)." which is *not* fully inside the
-# citation range and was therefore counted as a word.
+# Trailing punctuation that can cling to the last span of a citation.
 _TRAILING_PUNCT = '.,;:!?)]}\'"\u2019\u201d'
 
 
@@ -133,14 +175,11 @@ def apply_citation_exclusions(document: Document) -> None:
             s_start = span.source.char_start
             s_end = span.source.char_end
 
-            # [FIX 2] Trim trailing punctuation before the containment
-            # check. "(Smith, 2020)." -> span "2020)." -> trimmed "2020"
-            # now sits fully inside the citation range.
+            # Trim trailing punctuation before the containment check.
             trimmed_end = s_end
             while (trimmed_end > s_start
                    and block_text[trimmed_end - 1] in _TRAILING_PUNCT):
                 trimmed_end -= 1
-            # A span that is *entirely* punctuation is not a citation token.
             if trimmed_end <= s_start:
                 continue
 
@@ -183,7 +222,6 @@ def find_missed_candidates(document: Document) -> list[str]:
             key = matched.lower().strip()
             if key in already or key in seen:
                 continue
-            # [FIX 3b] Don't offer non-author parentheticals to the user.
             if not _author_is_plausible(matched):
                 continue
             seen.add(key)

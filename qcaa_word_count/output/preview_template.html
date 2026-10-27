@@ -1,0 +1,524 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>QCAA word count preview — {{filename}}</title>
+<style>
+:root {
+  --green:#1a7f37; --green-bg:#e8f5ec;
+  --red:#cf222e; --red-bg:#fdeeee;
+  --magenta:#8250df; --magenta-bg:#f3eefc;
+  --yellow:#9a6700; --yellow-bg:#fff8e5;
+  --grey:#6e7781; --grey-bg:#f0f2f4;
+  --cyan:#0969da; --cyan-bg:#eaf2fd;
+  --bg:#ffffff; --card:#f6f8fa;
+  --border:#d0d7de; --text:#1f2328;
+  --shadow: 0 1px 3px rgba(0,0,0,.06);
+}
+body.dark {
+  --green:#4ade80; --green-bg:#12321e;
+  --red:#f87171; --red-bg:#3a1414;
+  --magenta:#c084fc; --magenta-bg:#2a1845;
+  --yellow:#fbbf24; --yellow-bg:#3a2d0a;
+  --grey:#9ca3af; --grey-bg:#1f2227;
+  --cyan:#60a5fa; --cyan-bg:#0c1e3a;
+  --bg:#0d1117; --card:#161b22;
+  --border:#30363d; --text:#e6edf3;
+  --shadow: 0 1px 3px rgba(0,0,0,.4);
+}
+* { box-sizing: border-box; }
+body {
+  font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,
+              Helvetica,Arial,sans-serif;
+  max-width:1280px; margin:2rem auto; padding:0 1.5rem;
+  color:var(--text); line-height:1.6; background:var(--bg);
+  transition: background .2s, color .2s;
+}
+h1 { font-size:1.7rem; margin:0 0 .25rem 0; }
+.subtitle { color:var(--grey); margin-bottom:1.5rem; font-size:.95rem; }
+
+.toolbar {
+  display:flex; flex-wrap:wrap; gap:.5rem;
+  margin-bottom:1.5rem;
+}
+.toolbar button {
+  background:var(--card); border:1px solid var(--border);
+  color:var(--text); font-family:inherit; font-size:.85rem;
+  padding:.4rem .85rem; border-radius:6px; cursor:pointer;
+  transition: background .15s;
+}
+.toolbar button:hover { background:var(--cyan-bg); border-color:var(--cyan); color:var(--cyan); }
+.toolbar button.copied { background:var(--green-bg); border-color:var(--green); color:var(--green); }
+
+.legend {
+  display:flex; flex-wrap:wrap; gap:.5rem; margin-bottom:1.5rem;
+  font-size:.85rem;
+}
+.legend span {
+  display:inline-flex; align-items:center; gap:.4rem;
+  padding:.25rem .6rem; border-radius:999px;
+  background:var(--card); border:1px solid var(--border);
+  font-weight:500;
+}
+.legend .count { background:var(--green-bg); border-color:var(--green); color:var(--green); }
+.legend .exclude { background:var(--red-bg); border-color:var(--red); color:var(--red); }
+.legend .citation { background:var(--magenta-bg); border-color:var(--magenta); color:var(--magenta); }
+.legend .flag { background:var(--yellow-bg); border-color:var(--yellow); color:var(--yellow); }
+.legend .region-ex { background:var(--grey-bg); border-color:var(--grey); color:var(--grey); }
+.legend .heading { background:var(--cyan-bg); border-color:var(--cyan); color:var(--cyan); }
+
+.panel {
+  background:var(--card); border:1px solid var(--border);
+  border-radius:8px; padding:1.25rem 1.5rem; margin-bottom:1.5rem;
+  box-shadow:var(--shadow);
+}
+.panel h2 {
+  font-size:1.15rem; margin:0 0 .75rem 0;
+  display:flex; align-items:baseline; gap:.75rem;
+}
+.panel h2 .badge {
+  font-size:.75rem; padding:.15rem .5rem; border-radius:999px;
+  font-weight:600; letter-spacing:.02em;
+}
+.mismatch-banner {
+  background: var(--yellow-bg); border: 1px solid var(--yellow);
+  border-radius: 6px; padding: .6rem 1rem; margin-bottom: 1rem;
+  color: var(--yellow); font-weight: 500; font-size: .95rem;
+}
+.badge-good { background:var(--green-bg); color:var(--green); }
+.badge-bad  { background:var(--red-bg); color:var(--red); }
+.badge-info { background:var(--cyan-bg); color:var(--cyan); }
+.badge-warn { background:var(--yellow-bg); color:var(--yellow); }
+
+.doc-body {
+  font-family:"Source Serif Pro",Georgia,"Times New Roman",serif;
+  font-size:1.05rem; word-wrap:break-word;
+}
+.doc-body p { margin:0 0 .7rem 0; }
+.doc-body .heading {
+  color:var(--cyan); font-weight:700; font-size:1.18rem;
+  margin:1.4rem 0 .5rem 0;
+  padding-left:.5rem; border-left:4px solid var(--cyan);
+}
+.doc-body .heading.h1 { font-size:1.5rem; }
+.doc-body .heading.h2 { font-size:1.28rem; }
+.doc-body .heading.h3 { font-size:1.16rem; }
+
+.count     { color:var(--green); cursor:pointer; }
+.exclude   { color:var(--red); cursor:pointer;
+             text-decoration:line-through;
+             text-decoration-color:rgba(207,34,46,.35);
+             background:var(--red-bg); border-radius:2px; padding:0 1px; }
+.citation  { color:var(--magenta); cursor:pointer;
+             text-decoration:line-through;
+             text-decoration-color:rgba(130,80,223,.35);
+             background:var(--magenta-bg); border-radius:2px; padding:0 1px; }
+.flag      { color:var(--yellow); cursor:pointer;
+             background:var(--yellow-bg);
+             border-bottom:1px dashed var(--yellow); }
+.region-ex { color:var(--grey); font-style:italic;
+             background:var(--grey-bg); padding:2px 4px; border-radius:2px; }
+.unit      { color:var(--green); border-bottom:1px dotted var(--green); cursor:pointer; }
+
+.count:hover, .exclude:hover, .citation:hover, .flag:hover, .unit:hover {
+  outline:2px solid currentColor; outline-offset:1px; border-radius:2px;
+}
+
+table { border-collapse:collapse; margin:.75rem 0 1.25rem 0;
+        width:100%; font-size:.92rem; }
+td, th { border:1px solid var(--border); padding:.45rem .7rem;
+         vertical-align:top; white-space:pre-wrap; }
+th { background:var(--cyan-bg); color:var(--cyan); text-align:left; }
+tr:nth-child(even) td { background:var(--card); }
+
+.caption {
+  color:var(--grey); font-size:.85rem; font-style:italic;
+  margin:.15rem 0 .75rem 0;
+}
+
+.stats-grid { display:grid; grid-template-columns:max-content 1fr;
+              gap:.35rem 1rem; font-size:.95rem; }
+.stats-grid dt { color:var(--red); font-weight:500; }
+.stats-grid dd { margin:0; }
+.stats-grid dt.total-row { color:var(--green); font-weight:700; }
+.stats-grid dd.total-row { color:var(--green); font-weight:700; font-size:1.1rem; }
+
+details { margin-top:.75rem; }
+summary { cursor:pointer; color:var(--cyan); font-weight:500; }
+.final-count {
+  font-size:2.6rem; font-weight:700; color:var(--green);
+  margin:0 0 .5rem 0; line-height:1;
+}
+.final-count small { font-size:.9rem; color:var(--grey);
+  font-weight:400; margin-left:.5rem; }
+
+.table-chosen-count { color:var(--green); font-weight:600; }
+.table-chosen-exclude { color:var(--red); font-weight:600; }
+
+.stat-cards {
+  display:grid; grid-template-columns:repeat(auto-fit, minmax(170px, 1fr));
+  gap:.75rem; margin-bottom:1rem;
+}
+.stat-card {
+  background:var(--bg); border:1px solid var(--border);
+  border-radius:6px; padding:.75rem 1rem;
+}
+.stat-card .label {
+  font-size:.72rem; text-transform:uppercase; letter-spacing:.05em;
+  color:var(--grey); font-weight:600;
+}
+.stat-card .value {
+  font-size:1.5rem; font-weight:700; color:var(--cyan); line-height:1.2;
+}
+.stat-card .sub {
+  font-size:.8rem; color:var(--grey); margin-top:.15rem;
+}
+
+.section-bar {
+  display:flex; height:24px; border-radius:4px; overflow:hidden;
+  background:var(--grey-bg); margin-bottom:1rem;
+}
+.section-bar > div {
+  height:100%; display:flex; align-items:center; justify-content:center;
+  color:#fff; font-size:.7rem; font-weight:600; white-space:nowrap;
+  overflow:hidden;
+}
+
+.section-list { list-style:none; padding:0; margin:0; }
+.section-list li {
+  display:flex; justify-content:space-between;
+  padding:.35rem .5rem; border-bottom:1px solid var(--border);
+  font-size:.9rem;
+}
+.section-list li:last-child { border-bottom:none; }
+.section-list .name { color:var(--text); }
+.section-list .count { color:var(--green); font-weight:600; }
+.section-list .pct { color:var(--grey); font-size:.8rem; margin-left:.4rem; }
+
+.span-tooltip {
+  position:absolute; z-index:1000;
+  background:var(--card); border:1px solid var(--border);
+  border-radius:8px; padding:.85rem 1rem;
+  box-shadow:0 4px 12px rgba(0,0,0,.25);
+  max-width:340px; font-size:.85rem;
+  display:none;
+}
+.span-tooltip.visible { display:block; }
+.span-tooltip .st-text {
+  font-weight:600; margin-bottom:.4rem;
+  padding:.25rem .4rem; border-radius:3px;
+  word-break:break-all;
+}
+.span-tooltip .st-row {
+  display:grid; grid-template-columns:max-content 1fr;
+  gap:.15rem .75rem; margin-top:.35rem;
+}
+.span-tooltip .st-row dt { color:var(--grey); font-weight:500; }
+.span-tooltip .st-row dd { margin:0; word-break:break-word; }
+.span-tooltip .st-close {
+  float:right; cursor:pointer; color:var(--grey);
+  font-size:1.1rem; line-height:1; padding:0 .25rem;
+}
+.span-tooltip .st-close:hover { color:var(--red); }
+</style>
+</head>
+<body>
+
+<h1>QCAA word count preview</h1>
+<div class="subtitle">{{filename}} — generated by qcaa_word_count.py v5</div>
+
+<div class="toolbar">
+  <button id="theme-btn" type="button">🌙 Dark mode</button>
+  <button id="copy-btn" type="button">📋 Copy summary</button>
+  <button id="reset-btn" type="button" title="Undo all your toggles">↺ Reset toggles</button>
+  <button id="save-overrides-btn" type="button" title="Download a JSON file of your changes">💾 Save overrides</button>
+  <button type="button" onclick="window.print()">🖨️ Print / Save PDF</button>
+  <span id="override-status" style="align-self:center; font-size:.85rem; color:var(--grey);"></span>
+</div>
+
+<div class="panel" style="padding:.75rem 1rem;">
+  <strong>Interactive mode</strong> — click any coloured word to see its rule.
+  <strong>Ctrl+click</strong> (⌘+click on Mac) to toggle whether that specific word counts.
+  <strong>Alt+click</strong> to undo one toggle. The counter updates live.
+  Click <em>💾 Save overrides</em> to download a JSON file, then run
+  <code>python qcaa_word_count.py "yourfile.docx" --apply-overrides qcaa_overrides.json</code>.
+</div>
+
+<div class="legend">
+<span class="count">counted</span>
+<span class="exclude">excluded</span>
+<span class="citation">citation</span>
+<span class="flag">flagged</span>
+<span class="region-ex">region-excluded</span>
+<span class="heading">heading</span>
+</div>
+
+{{banner_html}}
+
+<div class="panel">
+  <h2><span class="badge badge-good">FINAL WORD COUNT</span></h2>
+  <div class="final-count">{{total}}<small>words</small></div>
+  <dl class="stats-grid">{{stats_rows}}</dl>
+</div>
+
+<div class="panel">
+  <h2>Statistics <span class="badge badge-info">writing breakdown</span></h2>
+  {{statistics_html}}
+</div>
+
+<div class="panel">
+  <h2>Document <span class="badge badge-info">colour-coded preview</span></h2>
+  <div class="doc-body">{{body_html}}</div>
+</div>
+
+{{additional_panels}}
+
+<details>
+<summary>Notes on how this was produced</summary>
+<p>Green text counts. Red text was excluded (numbers, symbols, equations). Magenta text was excluded as a citation. Yellow text was flagged and left undecided. Grey text is from an excluded region. Cyan text is a heading.</p>
+<p><strong>Click any coloured word</strong> to see the rule that was applied to it.</p>
+<p><strong>Citation detection is APA 7 only.</strong> Other styles may be counted as ordinary words. Use <code>python qcaa_word_count.py "your_file_name.docx" --report json</code> to audit every decision.</p>
+</details>
+
+<div class="span-tooltip" id="tooltip">
+  <span class="st-close" onclick="hideTooltip()">×</span>
+  <div class="st-text" id="tooltip-text"></div>
+  <dl class="st-row">
+    <dt>Decision</dt><dd id="tooltip-decision"></dd>
+    <dt>Rule</dt><dd id="tooltip-rule"></dd>
+    <dt>Reason</dt><dd id="tooltip-reason"></dd>
+  </dl>
+</div>
+
+<script>
+/* SUMMARY_JSON and ORIGINAL_TOTAL are substituted by Python before saving. */
+const SUMMARY_JSON = {{summary_json}};
+const ORIGINAL_TOTAL = {{original_total}};
+
+(function () {
+  // ---------- Theme ----------
+  const themeBtn = document.getElementById('theme-btn');
+  const saved = localStorage.getItem('qcaa-theme');
+  if (saved === 'dark') {
+    document.body.classList.add('dark');
+    themeBtn.textContent = '☀️ Light mode';
+  }
+  themeBtn.addEventListener('click', () => {
+    const dark = document.body.classList.toggle('dark');
+    themeBtn.textContent = dark ? '☀️ Light mode' : '🌙 Dark mode';
+    localStorage.setItem('qcaa-theme', dark ? 'dark' : 'light');
+  });
+
+  // ---------- Copy summary ----------
+  const copyBtn = document.getElementById('copy-btn');
+  copyBtn.addEventListener('click', async () => {
+    try {
+      await navigator.clipboard.writeText(SUMMARY_JSON);
+      copyBtn.textContent = '✅ Copied!';
+      copyBtn.classList.add('copied');
+      setTimeout(() => {
+        copyBtn.textContent = '📋 Copy summary';
+        copyBtn.classList.remove('copied');
+      }, 1500);
+    } catch (e) {
+      copyBtn.textContent = '❌ Copy failed';
+    }
+  });
+
+  // ---------- Tooltip ----------
+  const tooltip = document.getElementById('tooltip');
+  const tooltipText = document.getElementById('tooltip-text');
+  const tooltipDecision = document.getElementById('tooltip-decision');
+  const tooltipRule = document.getElementById('tooltip-rule');
+  const tooltipReason = document.getElementById('tooltip-reason');
+
+  document.addEventListener('click', (e) => {
+    const t = e.target;
+    if (!t.matches || !t.matches('span.span-toggle')) return;
+    if (e.ctrlKey || e.metaKey || e.altKey) return;
+    tooltipText.textContent = '"' + t.textContent + '"';
+    tooltipDecision.textContent = t.getAttribute('data-decision') || '(none)';
+    tooltipRule.textContent = t.getAttribute('data-rule') || '(none)';
+    tooltipReason.textContent = t.getAttribute('data-reason') || '(none)';
+    tooltipText.className = 'st-text ' + t.className.split(' ')[0];
+
+    const rect = t.getBoundingClientRect();
+    const top = window.scrollY + rect.bottom + 6;
+    const left = Math.min(
+      window.scrollX + rect.left,
+      window.scrollX + window.innerWidth - 360
+    );
+    tooltip.style.top = top + 'px';
+    tooltip.style.left = left + 'px';
+    tooltip.classList.add('visible');
+    e.stopPropagation();
+  });
+
+  document.addEventListener('click', (e) => {
+    if (!tooltip.contains(e.target)) tooltip.classList.remove('visible');
+  }, true);
+  window.hideTooltip = function () { tooltip.classList.remove('visible'); };
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape') hideTooltip();
+  });
+
+  // ---------- Per-instance toggle ----------
+  //
+  // The key is data-span-id, which is "{block_index}:{char_start}" —
+  // a stable identity for one specific span. Toggling one "the" does
+  // NOT toggle the other twenty-three.
+  //
+  const STORAGE_KEY = 'qcaa-overrides-' + location.pathname;
+  const overrides = new Map();   // span-id -> 'count' | 'exclude'
+
+  try {
+    const savedJson = localStorage.getItem(STORAGE_KEY);
+    if (savedJson) {
+      const parsed = JSON.parse(savedJson);
+      for (const [k, v] of Object.entries(parsed)) overrides.set(k, v);
+      applyAllOverrides();
+    }
+  } catch (e) { /* ignore */ }
+
+  function spanById(id) {
+    return document.querySelector(
+      'span.span-toggle[data-span-id="' + CSS.escape(id) + '"]'
+    );
+  }
+
+  function applyAllOverrides() {
+    for (const [id, want] of overrides.entries()) {
+      const el = spanById(id);
+      if (!el) continue;
+      const wasCounted = el.getAttribute('data-original-counted') === '1';
+      if (want === 'count' && !wasCounted) {
+        el.classList.remove('exclude', 'citation');
+        el.classList.add('count');
+      } else if (want === 'exclude' && wasCounted) {
+        el.classList.remove('count', 'unit');
+        el.classList.add('exclude');
+      }
+    }
+    updateTotal();
+  }
+
+  function computeTotal() {
+    // ORIGINAL_TOTAL is Python's total. Each override changes the count
+    // by exactly ±1 for that specific instance. Sum the deltas.
+    let delta = 0;
+    for (const [id, decision] of overrides.entries()) {
+      const el = spanById(id);
+      if (!el) continue;
+      const wasCounted = el.getAttribute('data-original-counted') === '1';
+      if (decision === 'count' && !wasCounted) delta += 1;
+      else if (decision === 'exclude' && wasCounted) delta -= 1;
+    }
+    return ORIGINAL_TOTAL + delta;
+  }
+
+  function updateTotal() {
+    const total = computeTotal();
+    const totalEl = document.querySelector('.final-count');
+    if (totalEl) {
+      const delta = total - ORIGINAL_TOTAL;
+      let deltaHtml = '';
+      if (delta !== 0) {
+        const colour = delta > 0 ? 'var(--green)' : 'var(--red)';
+        const sign = delta > 0 ? '+' : '';
+        deltaHtml = ' <span style="color:' + colour + '">(' +
+                    sign + delta + ')</span>';
+      }
+      totalEl.innerHTML = total + '<small>words' + deltaHtml + '</small>';
+    }
+    const status = document.getElementById('override-status');
+    if (status) {
+      status.textContent = overrides.size === 0
+        ? ''
+        : overrides.size + ' change' + (overrides.size === 1 ? '' : 's');
+    }
+  }
+
+  document.addEventListener('click', (e) => {
+    const t = e.target;
+    if (!t.matches || !t.matches('span.span-toggle')) return;
+    // Ctrl+click: toggle. Alt+click: undo just this one.
+    if (e.ctrlKey || e.metaKey) {
+      e.preventDefault();
+      const id = t.getAttribute('data-span-id');
+      if (!id) return;
+      const isNowCounted = t.classList.contains('count') ||
+                           t.classList.contains('unit');
+      if (isNowCounted) {
+        overrides.set(id, 'exclude');
+        t.classList.remove('count', 'unit');
+        t.classList.add('exclude');
+      } else {
+        overrides.set(id, 'count');
+        t.classList.remove('exclude', 'citation');
+        t.classList.add('count');
+      }
+      updateTotal();
+      persist();
+      return;
+    }
+    if (e.altKey) {
+      e.preventDefault();
+      const id = t.getAttribute('data-span-id');
+      if (!id) return;
+      overrides.delete(id);
+      persist();
+      location.reload();
+    }
+  });
+
+  function persist() {
+    try {
+      localStorage.setItem(
+        STORAGE_KEY,
+        JSON.stringify(Object.fromEntries(overrides))
+      );
+    } catch (e) { /* ignore */ }
+  }
+
+  const resetBtn = document.getElementById('reset-btn');
+  if (resetBtn) {
+    resetBtn.addEventListener('click', () => {
+      if (overrides.size === 0) return;
+      if (!confirm('Reset all ' + overrides.size + ' change(s)?')) return;
+      overrides.clear();
+      localStorage.removeItem(STORAGE_KEY);
+      location.reload();
+    });
+  }
+
+  const saveBtn = document.getElementById('save-overrides-btn');
+  if (saveBtn) {
+    saveBtn.addEventListener('click', () => {
+      // Write by-id so --apply-overrides can match per-instance.
+      const payload = {};
+      for (const [id, decision] of overrides.entries()) {
+        payload[id] = decision;
+      }
+      const body = JSON.stringify(
+        { overrides: payload, total: computeTotal() },
+        null,
+        2
+      );
+      const blob = new Blob([body], { type: 'application/json' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = 'qcaa_overrides.json';
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+      saveBtn.textContent = '✅ Downloaded';
+      setTimeout(() => { saveBtn.textContent = '💾 Save overrides'; }, 2000);
+    });
+  }
+})();
+</script>
+
+</body>
+</html>

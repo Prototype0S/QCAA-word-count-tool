@@ -1,4 +1,13 @@
-"""Save and load decisions across runs."""
+"""Save and load decisions across runs.
+
+[FIX 8] The old loader matched saved blocks by *block_index* and
+verified with a text hash. That meant inserting a paragraph in the
+middle of the document shifted every subsequent block's index, and
+every decision after the insertion was silently discarded.
+
+This version matches by *text hash alone*. A block whose text hasn't
+changed gets its decision back, regardless of where it moved to.
+"""
 from __future__ import annotations
 
 import hashlib
@@ -78,7 +87,7 @@ def save_decisions(document: Document, docx_path: str,
             "answer": fn.answer,
         })
 
-    # [FIX 13] Persist manually-added citations so they survive re-runs.
+    # Persist manually-added citations so they survive re-runs.
     citations_manual = [
         {"text": c.text, "occurrences": c.occurrences}
         for c in document.citations if c.source == "manual"
@@ -92,7 +101,7 @@ def save_decisions(document: Document, docx_path: str,
         "blocks": blocks,
         "tables": tables,
         "footnotes": footnotes,
-        "citations_manual": citations_manual,     # [FIX 13]
+        "citations_manual": citations_manual,
         "sections": getattr(document, "_sections_snapshot", []),
     }
 
@@ -104,7 +113,16 @@ def save_decisions(document: Document, docx_path: str,
 
 
 def load_decisions(document: Document, load_path: str) -> dict:
-    """Restore decisions from JSON where they still match."""
+    """Restore decisions from JSON where they still match.
+
+    [FIX 8] Blocks are matched by text hash, not by block_index, so
+    inserting a paragraph earlier in the document doesn't discard
+    every saved decision that came after it.
+
+    Tables are also matched by hash (index is unreliable after edits).
+    Footnotes are matched by ID + hash, because footnote IDs are
+    stable within a document.
+    """
     stats = {"restored": 0, "skipped": 0, "mismatched": 0, "loaded": False}
 
     try:
@@ -117,17 +135,24 @@ def load_decisions(document: Document, load_path: str) -> dict:
 
     stats["loaded"] = True
 
-    # --- Blocks (paragraphs, captions, text boxes) ---------------------
-    by_index = {b.block_index: b for b in document.blocks}
+    # --- Blocks: match by text hash -----------------------------------
+    # A document with two identical blocks (two "Introduction" headings,
+    # two "Figure 1" captions) matches the saved entry to whichever one
+    # is found first, then deletes it from the pool so the same saved
+    # entry isn't applied twice.
+    blocks_by_hash: dict[str, Block] = {}
+    for b in document.blocks:
+        h = _hash_text(b.text)
+        # Keep the first occurrence of each hash.
+        if h not in blocks_by_hash:
+            blocks_by_hash[h] = b
+
     for saved in payload.get("blocks", []):
-        idx = saved.get("block_index")
-        if idx not in by_index:
+        h = saved.get("text_hash")
+        if not h or h not in blocks_by_hash:
             stats["skipped"] += 1
             continue
-        block = by_index[idx]
-        if _hash_text(block.text) != saved.get("text_hash"):
-            stats["mismatched"] += 1
-            continue
+        block = blocks_by_hash.pop(h)
         try:
             decision = Decision(saved["decision"])
         except (KeyError, ValueError):
@@ -142,31 +167,32 @@ def load_decisions(document: Document, load_path: str) -> dict:
         )
         stats["restored"] += 1
 
-    # --- Tables --------------------------------------------------------
-    tables_by_idx = {t.table_index: t for t in document.tables}
+    # --- Tables: match by text hash -----------------------------------
+    tables_by_hash: dict[str, Table] = {}
+    for t in document.tables:
+        h = _table_hash(t)
+        if h not in tables_by_hash:
+            tables_by_hash[h] = t
+
     for saved in payload.get("tables", []):
-        idx = saved.get("table_index")
-        if idx not in tables_by_idx:
+        h = saved.get("text_hash")
+        if not h or h not in tables_by_hash:
             stats["skipped"] += 1
             continue
-        table = tables_by_idx[idx]
-        if _table_hash(table) != saved.get("text_hash"):
-            stats["mismatched"] += 1
-            continue
+        table = tables_by_hash.pop(h)
         try:
             answer = TableAnswer(saved["answer"])
         except (KeyError, ValueError):
             stats["skipped"] += 1
             continue
         table.answer = answer
-        # CRITICAL: re-apply so the table's spans get their decisions.
         apply_table_answer(
             table, answer,
             reason="Restored from saved decisions",
         )
         stats["restored"] += 1
 
-    # --- Footnotes -----------------------------------------------------
+    # --- Footnotes: match by ID + hash --------------------------------
     fns_by_id = {fn.footnote_id: fn for fn in document.footnotes}
     for saved in payload.get("footnotes", []):
         fid = saved.get("footnote_id")
@@ -184,9 +210,7 @@ def load_decisions(document: Document, load_path: str) -> dict:
         fn.answer = answer
         stats["restored"] += 1
 
-    # [FIX 13] Restore manual citations. These are appended to the
-    # list produced by collect_citations(); apply_citation_exclusions
-    # will then pick them up when it runs later in the pipeline.
+    # --- Manual citations --------------------------------------------
     for saved in payload.get("citations_manual", []):
         document.citations.append(Citation(
             text=saved["text"],

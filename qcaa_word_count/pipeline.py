@@ -44,6 +44,79 @@ def _apply_span_decisions(document: Document) -> None:
             span.decision_record = rec
 
 
+def _apply_user_overrides(document: Document, overrides: dict) -> None:
+    """Apply browser-toggled overrides from the interactive HTML preview.
+
+    Overrides are keyed by span ID ("{block_index}:{char_start}") — the
+    same identifier used in the HTML preview. That makes them
+    *per-instance*: toggling one occurrence of "the" does not affect
+    the other twenty-three.
+
+    Falls back to text-keyed overrides for compatibility with any
+    overrides file created before per-instance IDs existed.
+    """
+    # Build an index of every span in the document, keyed by span ID.
+    spans_by_id: dict[str, object] = {}
+    for block in document.blocks:
+        for span in block.spans:
+            sid = f"{span.source.block_index}:{span.source.char_start}"
+            spans_by_id[sid] = span
+    for table in document.tables:
+        for cell in table.iter_cells():
+            for span in cell.spans:
+                sid = f"{span.source.block_index}:{span.source.char_start}"
+                spans_by_id[sid] = span
+
+    applied = 0
+    skipped = 0
+    for key, want in overrides.items():
+        if want not in ("count", "exclude"):
+            skipped += 1
+            continue
+
+        # New format: "block_index:char_start"
+        span = spans_by_id.get(key)
+
+        # Legacy fallback: key is a text token (from old previews).
+        if span is None and ":" not in key:
+            for block in document.blocks:
+                if block.region_record.decision == Decision.EXCLUDE:
+                    continue
+                for s in block.spans:
+                    if s.text == key:
+                        span = s
+                        break
+                if span is not None:
+                    break
+
+        if span is None:
+            skipped += 1
+            continue
+
+        if want == "count":
+            span.decision_record = DecisionRecord(
+                decision=Decision.COUNT,
+                rule_id="I-USER-OVERRIDE",
+                confidence=1.0,
+                reason="User toggle from HTML preview",
+                source="manual",
+            )
+        else:
+            span.decision_record = DecisionRecord(
+                decision=Decision.EXCLUDE,
+                rule_id="I-USER-OVERRIDE",
+                confidence=1.0,
+                reason="User toggle from HTML preview",
+                source="manual",
+            )
+        applied += 1
+
+    if applied or skipped:
+        msg = f"  Applied {applied} user override(s) from HTML preview"
+        if skipped:
+            msg += f" ({skipped} skipped — span no longer present)"
+        print(grey(msg))
+
 def _prepare(path: str) -> Document:
     document = ingest(path)
     for table in document.tables:
@@ -71,7 +144,7 @@ def _print_summary_line(document: Document) -> None:
 
 
 def _print_region_debug(document: Document) -> None:
-    """[FIX 14] Set QCAA_DEBUG_REGIONS=1 to dump every block's region."""
+    """Set QCAA_DEBUG_REGIONS=1 to dump every block's region."""
     if not os.environ.get("QCAA_DEBUG_REGIONS"):
         return
     print()
@@ -91,7 +164,8 @@ def run(path: str, *, mode: str = "interactive",
         show_diff: bool = False,
         export_format: str | None = None,
         export_path: str | None = None,
-        html_path: str | None = None) -> int:
+        html_path: str | None = None,
+        overrides: dict | None = None) -> int:
     """Run the tool. `mode` is one of:
         review, include-all, summary, preview, check
     """
@@ -131,31 +205,36 @@ def run(path: str, *, mode: str = "interactive",
     _print_summary_line(document)
     _print_region_debug(document)
 
+    # ---- Apply browser overrides (after saved decisions, before prompts)
+    if overrides:
+        _apply_user_overrides(document, overrides)
+
     # ---- Early-exit modes --------------------------------------------
     if mode == "summary":
         resolve_all(document, auto_accept=True)
         result = count_words(document)
         _snapshot_sections(document, result)
         if save:
-            # [FIX 15] Pass the total so --check diff works next time.
             save_decisions(document, path, total=result["total"])
-        print()
-        print(f"{document.filename}\t{result['total']}")
+        # Caveat BEFORE the number so scripts still see it.
         print(grey("  (Fast mode: footnotes counted as body. "
                    "Use --review for the QCAA-accurate count.)"))
+        print()
+        print(f"{document.filename}\t{result['total']}")
         return 0
 
     if mode == "preview":
         resolve_all(document, auto_accept=True)
         result = count_words(document)
         _snapshot_sections(document, result)
-        if save:
-            save_decisions(document, path, total=result["total"])
+        # --preview-only is non-committal: do NOT save decisions.
         html_file = write_html_preview(
             document, result, output_path=html_path, open_browser=open_browser,
         )
         print()
         print(f"{bold('HTML preview written to:')} {cyan(html_file)}")
+        print(grey("  (No decisions were saved. Use --review or --include-all "
+                   "to commit.)"))
         return 0
 
     # ---- Normal modes -------------------------------------------------
@@ -178,7 +257,7 @@ def run(path: str, *, mode: str = "interactive",
         sections = getattr(document, "_sections_snapshot", [])
         print_diff(save_path, sections, result["total"])
 
-    # ---- Mismatch warning (F8) + region sanity check -----------------
+    # ---- Mismatch warning + region sanity check ----------------------
     if stated and stated != result["total"]:
         delta = result["total"] - stated
         pct = abs(delta) / stated * 100 if stated else 0
@@ -188,8 +267,6 @@ def run(path: str, *, mode: str = "interactive",
             f"    Tool calculates {result['total']} "
             f"(differs by {abs(delta):+d})"
         ))
-        # [FIX 10] A gap of more than 20% is not rounding — it means a
-        # whole region, table, or caption was decided the wrong way.
         if pct > 20:
             print()
             print(yellow(
@@ -200,8 +277,6 @@ def run(path: str, *, mode: str = "interactive",
                 f"  Run with --review to check the ambiguous decisions."
             ))
 
-    # [FIX 10b] Independent of any stated count: if more than 20% of
-    # blocks are region-excluded, the detector probably fired wrong.
     total_blocks = len(document.blocks)
     excluded_blocks = sum(
         1 for b in document.blocks
@@ -220,7 +295,6 @@ def run(path: str, *, mode: str = "interactive",
 
     # ---- Save (before output, so preview shows final state) ----------
     if save:
-        # [FIX 15] Pass the total so --check diff works next time.
         save_decisions(document, path, total=result["total"])
 
     # ---- Preview / report -------------------------------------------

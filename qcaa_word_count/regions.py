@@ -27,11 +27,20 @@ def detect_regions(document: Document) -> None:
     # [FIX 8] Walk the opening blocks and stop the TITLE_PAGE region
     # at the first block that looks like body prose. A Word heading
     # still ends the title page (as before); so does substantial prose.
+    #
+    # [FIX 16] Look ahead one block. If a block would be classified as
+    # TITLE_PAGE but the *next* block is prose, this block is the
+    # opening line of the body, not a title-page line. A title page
+    # cannot "resume" after prose, so anything directly before the
+    # first prose block is prose too.
     current_region = Region.BODY
     current_level: int | None = None
     in_title_page = True
 
-    for block in document.blocks:
+    # Precompute prose verdicts so the lookahead doesn't re-run the regex.
+    prose_flags = [_looks_like_body_prose(b.text) for b in document.blocks]
+
+    for idx, block in enumerate(document.blocks):
         text = block.text.strip()
 
         # --- Opening title-page window ---------------------------------
@@ -39,12 +48,23 @@ def detect_regions(document: Document) -> None:
             if block.block_type == BlockType.HEADING:
                 in_title_page = False
                 # fall through to heading handling below
-            elif _looks_like_body_prose(text):
+            elif prose_flags[idx]:
                 in_title_page = False
                 block.region = Region.BODY
                 current_region = Region.BODY
                 continue
             else:
+                # [FIX 16] Lookahead: opening prose block.
+                next_is_prose = (
+                    idx + 1 < len(document.blocks)
+                    and document.blocks[idx + 1].block_type != BlockType.HEADING
+                    and prose_flags[idx + 1]
+                )
+                if next_is_prose and any(c.isalpha() for c in text):
+                    in_title_page = False
+                    block.region = Region.BODY
+                    current_region = Region.BODY
+                    continue
                 block.region = Region.TITLE_PAGE
                 continue
 

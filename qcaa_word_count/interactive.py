@@ -1,6 +1,9 @@
 """Interactive prompts for tables, captions, footnotes, citations."""
 from __future__ import annotations
 
+import sys
+from typing import Callable
+
 from .citations import (
     apply_citation_exclusions,
     count_occurrences_in_body,
@@ -13,6 +16,12 @@ from .output import bold, cyan, green, grey, magenta, red, yellow
 from .tables import (
     apply_table_answer, suggest_table_answer, table_has_strong_default,
 )
+
+# [FIX 5] Resolver prompt injection — every resolver accepts a `prompt`
+# callable. Default is `_menu`. Tests can pass a lambda to skip the
+# terminal entirely.
+PromptFn = Callable[[str, list[tuple[str, str]], str | None], str]
+
 
 
 QCAA_TABLE_HELP = f"""
@@ -87,8 +96,17 @@ def _menu(question: str, options: list[tuple[str, str]],
                     break
         try:
             raw = input(f"\n{bold('Your choice')}{default_hint}: ").strip()
-        except (EOFError, KeyboardInterrupt):
-            raw = ""
+        except EOFError:
+            # EOF (piped input ended) = use default if available
+            if default_key is not None:
+                return default_key
+            print(red("\nNo input."))
+            sys.exit(1)
+        except KeyboardInterrupt:
+            # [FIX 6] Ctrl+C aborts the program, not just re-prompts
+            print()
+            print(grey("Aborted."))
+            sys.exit(130)
         if not raw and default_key is not None:
             return default_key
         if not raw.isdigit():
@@ -221,8 +239,6 @@ def resolve_tables(document: Document, auto_accept: bool) -> bool:
     if auto_accept:
         for table in document.tables:
             if table.answer is not None:
-                # Already decided (e.g. restored from saved state).
-                # Re-apply so spans reflect the decision.
                 apply_table_answer(
                     table, table.answer,
                     reason="Reapplied saved decision",
@@ -239,7 +255,6 @@ def resolve_tables(document: Document, auto_accept: bool) -> bool:
     _panel(f"{len(document.tables)} table(s) found.")
     for i, table in enumerate(document.tables, start=1):
         if table.answer is not None:
-            # Already decided (restored) — re-apply just in case.
             apply_table_answer(
                 table, table.answer,
                 reason="Reapplied saved decision",
@@ -467,8 +482,13 @@ def resolve_citations(document: Document) -> None:
             print()
         try:
             raw = input(f"{bold('>')} ").strip()
-        except (EOFError, KeyboardInterrupt):
+        except EOFError:
             break
+        except KeyboardInterrupt:
+            # [FIX 6] Ctrl+C aborts the program here too
+            print()
+            print(grey("Aborted."))
+            sys.exit(130)
         if not raw:
             break
         if raw.lower() == "a":

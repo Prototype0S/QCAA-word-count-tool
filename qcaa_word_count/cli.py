@@ -33,6 +33,11 @@ EXCLUDED:
   - page numbers
   - in-text citations
   - blank pages
+
+NOTE ON UNITS:
+  "5 kg" counts one word (the unit); "5kg" counts zero (number+unit
+  is treated as one number token). Both are the literal reading of
+  the QCAA rule, not a bug.
 """
 
 
@@ -123,7 +128,8 @@ def main(argv: list[str] | None = None) -> int:
     g.add_argument("--summary", action="store_true",
                    help="Print only the count, then exit (fastest)")
     g.add_argument("--preview-only", action="store_true",
-                   help="Generate the HTML preview without prompting")
+                   help="Generate the HTML preview without prompting "
+                        "or saving decisions")
     g.add_argument("--check", action="store_true",
                    help="Compare this run's count to the last saved run")
     g.add_argument("--review", action="store_true",
@@ -141,14 +147,15 @@ def main(argv: list[str] | None = None) -> int:
 
     # Output
     parser.add_argument("--open", action="store_true",
-                        help="Open the HTML preview (default)")
+                        help="Open the HTML preview in the browser (default)")
     parser.add_argument("--no-open", action="store_true",
                         help="Don't open the HTML preview")
     parser.add_argument("--html-path", help="Path for the HTML preview")
     parser.add_argument("--report", choices=["json", "csv"],
                         help="Export a full decision log")
     parser.add_argument("--report-path", help="Path for the decision log")
-
+    parser.add_argument("--apply-overrides",
+                        help="Path to qcaa_overrides.json from the HTML preview")
     # Info / meta
     parser.add_argument("--explain", action="store_true",
                         help="Print the QCAA rules and exit")
@@ -163,6 +170,18 @@ def main(argv: list[str] | None = None) -> int:
     if args.tutorial:
         run_tutorial_if_first_time(force=True)
         return 0
+    if args.apply_overrides:
+        try:
+            with open(args.apply_overrides, "r", encoding="utf-8") as f:
+                payload = json.load(f)
+        except (OSError, json.JSONDecodeError) as e:
+            print(red(f"Couldn't read overrides file: {e}"))
+            return 2
+        overrides = payload.get("overrides", {})
+        if overrides:
+            print(grey(f"  Applying {len(overrides)} override(s) from "
+                       f"{args.apply_overrides}"))
+            # Defer to run() — pass through
 
     # First-run tutorial (only if no preset flag was given)
     preset_given = any([args.summary, args.preview_only, args.check,
@@ -178,6 +197,7 @@ def main(argv: list[str] | None = None) -> int:
             print(red("No file selected."))
             return 1
 
+    # [FIX 1] Exit correctly when the user picks option 5.
     if args.summary:
         mode = "summary"
     elif args.preview_only:
@@ -189,17 +209,16 @@ def main(argv: list[str] | None = None) -> int:
     elif args.include_all:
         mode = "include-all"
     else:
-        mode = _startup_choice() or "review"
-        if mode == "review":
-            mode = "review"   # already correct, just being explicit
-        if mode not in ("review", "include-all"):
-            # User chose exit or the QCAA rules
-            if mode == "review":
-                pass
-            else:
-                return 0
+        chosen = _startup_choice()
+        if chosen is None:
+            return 0
+        mode = chosen
 
-    open_browser = not args.no_open
+    # [FIX 2] --open was previously a no-op. --no-open still wins if both given.
+    if args.no_open:
+        open_browser = False
+    else:
+        open_browser = True
 
     return run(
         path,
@@ -213,4 +232,5 @@ def main(argv: list[str] | None = None) -> int:
         export_format=args.report,
         export_path=args.report_path,
         html_path=args.html_path,
+        overrides=overrides if 'overrides' in locals() else None,
     )
