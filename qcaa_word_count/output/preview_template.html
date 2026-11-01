@@ -364,27 +364,47 @@ const ORIGINAL_TOTAL = {{original_total}};
 
   // ---------- Per-instance toggle ----------
   //
-  // The key is data-span-id, which is "{block_index}:{char_start}" —
-  // a stable identity for one specific span. Toggling one "the" does
-  // NOT toggle the other twenty-three.
+  // Overrides are keyed by data-span-id ("{block_index}:{char_start}").
   //
-  const STORAGE_KEY = 'qcaa-overrides-' + location.pathname;
-  const overrides = new Map();   // span-id -> 'count' | 'exclude'
+  // [FIX 21] The storage key is fingerprinted with (total, span_count)
+  // so stale overrides from a previous version of the document don't
+  // apply to a re-render. This prevents the "-3 on load" bug where
+  // 30 old entries loaded and 3 of them coincidentally matched spans
+  // that still existed.
+  //
+  // [FIX 22] The status badge shows only *applicable* overrides
+  // (those whose target span still exists), not the raw count of
+  // entries in localStorage.
+  //
+  const _spanCount = document.querySelectorAll('span.span-toggle[data-span-id]').length;
+  const _fingerprint = ORIGINAL_TOTAL + '-' + _spanCount;
+  const STORAGE_KEY = 'qcaa-overrides-v2-' + location.pathname + '-' + _fingerprint;
 
+  // One-time migration: wipe the old key format so it never loads again.
   try {
-    const savedJson = localStorage.getItem(STORAGE_KEY);
-    if (savedJson) {
-      const parsed = JSON.parse(savedJson);
-      for (const [k, v] of Object.entries(parsed)) overrides.set(k, v);
-      applyAllOverrides();
-    }
+    localStorage.removeItem('qcaa-overrides-' + location.pathname);
   } catch (e) { /* ignore */ }
+
+  const overrides = new Map();   // span-id -> 'count' | 'exclude'
+  let loadedFromPrevious = 0;
 
   function spanById(id) {
     return document.querySelector(
       'span.span-toggle[data-span-id="' + CSS.escape(id) + '"]'
     );
   }
+
+  try {
+    const savedJson = localStorage.getItem(STORAGE_KEY);
+    if (savedJson) {
+      const parsed = JSON.parse(savedJson);
+      for (const [k, v] of Object.entries(parsed)) overrides.set(k, v);
+      for (const id of overrides.keys()) {
+        if (spanById(id)) loadedFromPrevious += 1;
+      }
+      applyAllOverrides();
+    }
+  } catch (e) { /* ignore */ }
 
   function applyAllOverrides() {
     for (const [id, want] of overrides.entries()) {
@@ -432,9 +452,18 @@ const ORIGINAL_TOTAL = {{original_total}};
     }
     const status = document.getElementById('override-status');
     if (status) {
-      status.textContent = overrides.size === 0
-        ? ''
-        : overrides.size + ' change' + (overrides.size === 1 ? '' : 's');
+      let applied = 0;
+      for (const id of overrides.keys()) {
+        if (spanById(id)) applied += 1;
+      }
+      if (applied === 0) {
+        status.textContent = '';
+      } else {
+        status.textContent = applied + ' change' + (applied === 1 ? '' : 's');
+        if (loadedFromPrevious > 0) {
+          status.textContent += ' (from previous session)';
+        }
+      }
     }
   }
 
@@ -457,6 +486,7 @@ const ORIGINAL_TOTAL = {{original_total}};
         t.classList.remove('exclude', 'citation');
         t.classList.add('count');
       }
+      loadedFromPrevious = 0;
       updateTotal();
       persist();
       return;
@@ -466,6 +496,7 @@ const ORIGINAL_TOTAL = {{original_total}};
       const id = t.getAttribute('data-span-id');
       if (!id) return;
       overrides.delete(id);
+      loadedFromPrevious = 0;
       persist();
       location.reload();
     }
@@ -486,7 +517,10 @@ const ORIGINAL_TOTAL = {{original_total}};
       if (overrides.size === 0) return;
       if (!confirm('Reset all ' + overrides.size + ' change(s)?')) return;
       overrides.clear();
-      localStorage.removeItem(STORAGE_KEY);
+      loadedFromPrevious = 0;
+      try {
+        localStorage.removeItem(STORAGE_KEY);
+      } catch (e) { /* ignore */ }
       location.reload();
     });
   }
@@ -497,7 +531,7 @@ const ORIGINAL_TOTAL = {{original_total}};
       // Write by-id so --apply-overrides can match per-instance.
       const payload = {};
       for (const [id, decision] of overrides.entries()) {
-        payload[id] = decision;
+        if (spanById(id)) payload[id] = decision;
       }
       const body = JSON.stringify(
         { overrides: payload, total: computeTotal() },
