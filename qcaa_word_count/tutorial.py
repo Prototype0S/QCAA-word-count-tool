@@ -133,6 +133,13 @@ def run_tutorial_if_first_time(force: bool = False) -> None:
     """Show the tutorial if it's the user's first time, or if forced."""
     if not force and has_seen():
         return
+    # Ensure the box-drawing characters render on Windows cmd.exe.
+    try:
+        import sys
+        if hasattr(sys.stdout, "reconfigure"):
+            sys.stdout.reconfigure(encoding="utf-8")
+    except Exception:
+        pass
     print(TUTORIAL_TEXT)
     try:
         input(grey("Press Enter to continue to the startup menu..."))

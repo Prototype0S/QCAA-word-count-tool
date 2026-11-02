@@ -1,36 +1,7 @@
 """APA 7 in-text citation detection and exclusion.
 
-Walks BOTH paragraph blocks AND table cell blocks. This was previously
-missing — a citation inside a table (e.g. the "Already existing target
-audience ... (Australian Bureau of Statistics, 2021)" bullet in a SWOT
-table) was silently counted because collect_citations and
-apply_citation_exclusions only iterated document.blocks.
-
-Covers all standard APA 7 in-text forms:
-
-    Parenthetical:
-        (Smith, 2020)
-        (Smith, 2020, p. 170) / (Smith, 2020, pp. 170-175)
-        (Smith & Jones, 2020)
-        (Smith, Jones, & Brown, 2020)
-        (Smith, Jones, & Brown, 2020, p. 170)
-        (Smith et al., 2020) / (Smith et al., 2020, p. 170)
-        (Smith, n.d.) / (Smith, n.d., p. 170)
-        (Smith, 2020a) / (Smith, 2020a, 2020b)
-        (Smith, 2020; Jones, 2021)
-        (Smith, 2020, p. 170; Jones, 2021, p. 45)
-        (Smith, 2020, as cited in Jones, 2021)
-        (Australian Bureau of Statistics, 2026)
-        (A Guide to All Schools in Brisbane, Queensland - Australian Schools
-            Directory, 2021)
-        (Blue Cards for Legal Professionals - Qld.Gov.Au, 2026)
-
-    Narrative:
-        Smith (2020) / Smith (2020, p. 170)
-        Smith and Jones (2020) / Smith et al. (2020)
-        According to the AKG First Job to Future Career Report Australia
-            (n.d.), 78% of young people...
-        The Australian Bureau of Statistics (2026) reports...
+Walks BOTH paragraph blocks AND table cell blocks. Covers all standard
+APA 7 in-text forms (see patterns below).
 
 KNOWN EDGE CASES
 
@@ -39,13 +10,11 @@ KNOWN EDGE CASES
    entries live inside the References region, which is excluded
    wholesale, so this does not affect actual submissions.
 
-2. Possessive narrative forms ("Smith's (2020) study") are not
-   detected. Students typically write "Smith (2020) argues" instead.
+2. Possessive narrative forms ("Smith's (2020) study") are not detected.
 
 3. Non-standard paraphrase titles in the body may not match the exact
    title in the reference list. Intentional — cross-referencing between
-   body and reference is unreliable because students often shorten or
-   rephrase the title in-text.
+   body and reference is unreliable.
 """
 from __future__ import annotations
 
@@ -54,12 +23,6 @@ import re
 from .model import Citation, Decision, DecisionRecord, Document, Region, SpanType
 
 
-# ---------------------------------------------------------------------------
-# Prose connectors that may precede a narrative citation but are NOT
-# part of the citation itself. Used as a negative lookahead so the
-# narrative pattern starts at the author, not at "According to".
-# ---------------------------------------------------------------------------
-
 _NARRATIVE_LEAD_BLACKLIST = (
     "According|As|However|Therefore|Thus|Moreover|Furthermore|"
     "Additionally|Although|While|When|Where|Since|Because|Despite|"
@@ -67,15 +30,7 @@ _NARRATIVE_LEAD_BLACKLIST = (
 )
 
 
-# ---------------------------------------------------------------------------
-# Patterns
-#
-# Order matters: more specific patterns first so they claim their range
-# before broader patterns try to match a substring of it.
-# ---------------------------------------------------------------------------
-
 APA_PATTERNS: list[tuple[str, re.Pattern]] = [
-    # (Smith, 2020, p. 170) / (Smith, Jones, & Brown, 2020, p. 170)
     ("with page numbers", re.compile(
         r"\(\s*[A-Z][A-Za-z'’\-]+"
         r"(?:\s*,\s*[A-Z][A-Za-z'’\-]+)*"
@@ -86,16 +41,12 @@ APA_PATTERNS: list[tuple[str, re.Pattern]] = [
         r"(?:\s*[-\u2013]\s*(?:\d+|[ivxlc]+))?"
         r"\s*\)"
     )),
-
-    # (Smith, 2020a, 2020b)
     ("same-author-multi-year", re.compile(
         r"\(\s*[A-Z][A-Za-z'’\-]+"
         r"\s*,\s*(?:19|20)\d{2}[a-z]?"
         r"(?:\s*,\s*(?:19|20)\d{2}[a-z]?)+"
         r"\s*\)"
     )),
-
-    # (Smith, 2020; Jones, 2021) / with optional page locators
     ("multi-citation", re.compile(
         r"\(\s*[A-Z][A-Za-z'’\-]+"
         r"(?:\s+(?:&|and)\s+[A-Z][A-Za-z'’\-]+)?"
@@ -107,8 +58,6 @@ APA_PATTERNS: list[tuple[str, re.Pattern]] = [
         r"(?:\s*,\s*pp?\.?\s*\d+(?:\s*[-\u2013]\s*\d+)?)?)+"
         r"\s*\)"
     )),
-
-    # (Smith, 2020, as cited in Jones, 2021)
     ("secondary-source", re.compile(
         r"\(\s*[A-Z][A-Za-z'’\-]+"
         r"(?:\s*,?\s*(?:&|and)\s+[A-Z][A-Za-z'’\-]+)?"
@@ -119,8 +68,6 @@ APA_PATTERNS: list[tuple[str, re.Pattern]] = [
         r"\s*,\s*(?:19|20)\d{2}[a-z]?"
         r"\s*\)"
     )),
-
-    # (Smith & Jones, 2020) / (Smith, Jones, & Brown, 2020)
     ("multi-author", re.compile(
         r"\(\s*[A-Z][A-Za-z'’\-]+"
         r"(?:\s*(?:,|&|and)\s*[A-Z][A-Za-z'’\-]+)+"
@@ -128,54 +75,34 @@ APA_PATTERNS: list[tuple[str, re.Pattern]] = [
         r"\s*,\s*(?:19|20)\d{2}[a-z]?"
         r"(?:\s*,\s*pp?\.?\s*\d+(?:\s*[-\u2013]\s*\d+)?)?\s*\)"
     )),
-
-    # (Smith et al., 2020)
     ("et-al", re.compile(
         r"\(\s*[A-Z][A-Za-z'’\-]+\s+et\s+al\.?\s*,\s*(?:19|20)\d{2}[a-z]?"
         r"(?:\s*,\s*pp?\.?\s*\d+(?:\s*[-\u2013]\s*\d+)?)?\s*\)"
     )),
-
-    # (Smith, n.d.) / (Smith, n.d., p. 170)
     ("no-date", re.compile(
         r"\(\s*[A-Z][A-Za-z'’\-]+"
         r"(?:\s+(?:&|and)\s+[A-Z][A-Za-z'’\-]+)?"
         r"(?:\s+et\s+al\.?)?\s*,\s*n\.?\s*d\.?"
         r"(?:\s*,\s*pp?\.?\s*\d+(?:\s*[-\u2013]\s*\d+)?)?\s*\)"
     )),
-
-    # (Smith, 2020)
     ("simple", re.compile(
         r"\(\s*[A-Z][A-Za-z'’\-]+\s*,\s*(?:19|20)\d{2}[a-z]?"
         r"(?:\s*,\s*pp?\.?\s*\d+(?:\s*[-\u2013]\s*\d+)?)?\s*\)"
     )),
-
-    # (Smith. , 2020) — malformed from citation generators
     ("simple-loose", re.compile(
         r"\(\s*[A-Z][A-Za-z'’\-]+(?:\s+[A-Z][A-Za-z'’\-]+){0,5}"
         r"\s*\.?\s*,\s*(?:19|20)\d{2}[a-z]?\s*\)"
     )),
-
-    # [FIX 18e] Corporate / title-style author with lowercase particles
-    # and internal punctuation.
     ("corporate-loose", re.compile(
         r"\(\s*[A-Z][^()]{0,120}?"
         r",\s*(?:19|20)\d{2}[a-z]?"
         r"(?:\s*,\s*pp?\.?\s*\d+(?:\s*[-\u2013]\s*\d+)?)?"
         r"\s*\)"
     )),
-
-    # (Australian Bureau of Statistics, 2026)
     ("corporate", re.compile(
         r"\(\s*[A-Z][A-Za-z'’\-]+(?:\s+[A-Z][A-Za-z'’\-]+){1,6}"
         r"\s*,\s*(?:19|20)\d{2}[a-z]?\s*\)"
     )),
-
-    # [FIX 19] Multi-word narrative: Org/Title (year) / Org/Title (n.d.)
-    # Catches:
-    #   "According to the AKG First Job to Future Career Report Australia
-    #    (n.d.), 78%..."
-    #   "The Australian Bureau of Statistics (2026) reports..."
-    # The negative lookahead prevents "According to" from being swallowed.
     ("narrative-multiword", re.compile(
         rf"\b(?!(?:{_NARRATIVE_LEAD_BLACKLIST})\b)"
         r"[A-Z][A-Za-z'’\-]+"
@@ -184,8 +111,6 @@ APA_PATTERNS: list[tuple[str, re.Pattern]] = [
         r"(?:\s*,\s*pp?\.?\s*\d+(?:\s*[-\u2013]\s*\d+)?)?"
         r"\)"
     )),
-
-    # Smith (2020) / Smith (2020, p. 170) — single-word narrative
     ("narrative", re.compile(
         r"\b[A-Z][A-Za-z'’\-]+"
         r"(?:\s+(?:and|&)\s+[A-Z][A-Za-z'’\-]+|\s+et\s+al\.?)?"
@@ -194,10 +119,6 @@ APA_PATTERNS: list[tuple[str, re.Pattern]] = [
     )),
 ]
 
-
-# ---------------------------------------------------------------------------
-# Author-plausibility check
-# ---------------------------------------------------------------------------
 
 _NON_AUTHOR_WORDS = frozenset({
     "figure", "fig", "figs", "table", "tbl", "tables",
@@ -219,13 +140,6 @@ _NON_AUTHOR_WORDS = frozenset({
 
 
 def _author_is_plausible(matched: str) -> bool:
-    """Reject matches whose leading token is a non-author noun.
-
-    A match is a plausible author/title if:
-      - the first word is not blacklisted, OR
-      - the first word is blacklisted but the second word is a
-        capitalised non-blacklisted word.
-    """
     m = re.match(r"[\(\s]*([A-Za-z'’\-]+)", matched)
     if not m:
         return True
@@ -246,24 +160,13 @@ def _author_is_plausible(matched: str) -> bool:
     return True
 
 
-# ---------------------------------------------------------------------------
-# Citable-block iterator
-#
-# [FIX 20] THE BUG FIX. Previously collect_citations and
-# apply_citation_exclusions only iterated document.blocks (paragraph
-# blocks). A citation inside a table cell (SWOT table, data tables,
-# comparison tables) was silently ignored — never detected, never
-# excluded.
-#
-# _iter_citable_blocks yields BOTH paragraph blocks (whose region is
-# not excluded) AND every table cell block. Table cells don't have a
-# region_record in the same way; their exclusion is decided at the
-# span level by apply_table_answer, so we yield them unconditionally
-# and let the span-level logic handle it.
-# ---------------------------------------------------------------------------
-
 def _iter_citable_blocks(document: Document):
-    """Yield every Block that can contain an in-text citation."""
+    """Yield every Block that can contain an in-text citation.
+
+    Includes both paragraph blocks (non-excluded regions) and every
+    table cell block, so citations inside tables are detected and
+    excluded just like citations in body paragraphs.
+    """
     for block in document.blocks:
         if block.region_record.decision == Decision.EXCLUDE:
             continue
@@ -278,10 +181,6 @@ def _iter_citable_blocks(document: Document):
                 continue
             yield cell
 
-
-# ---------------------------------------------------------------------------
-# Pattern matching
-# ---------------------------------------------------------------------------
 
 def find_apa_citations(text: str) -> list[tuple[str, str]]:
     found: list[tuple[str, str]] = []
@@ -300,7 +199,6 @@ def find_apa_citations(text: str) -> list[tuple[str, str]]:
 
 
 def collect_citations(document: Document) -> list[Citation]:
-    """Detect citations in paragraphs AND table cells."""
     by_text: dict[str, Citation] = {}
     for block in _iter_citable_blocks(document):
         for matched, pattern_name in find_apa_citations(block.text):
@@ -314,20 +212,22 @@ def collect_citations(document: Document) -> list[Citation]:
     return sorted(by_text.values(), key=lambda c: c.text.lower())
 
 
-# ---------------------------------------------------------------------------
-# Exclusion
-# ---------------------------------------------------------------------------
-
 _TRAILING_PUNCT = '.,;:!?)]}\'"\u2019\u201d'
 
 
 def apply_citation_exclusions(document: Document) -> None:
     """Mark every span inside a detected citation as EXCLUDE.
 
-    Walks paragraphs AND table cells. This runs multiple times in the
-    pipeline (once during _prepare, again at the end of resolve_citations)
-    so that any citation that got re-classified by apply_table_answer
-    during resolve_tables is restored.
+    Walks paragraphs AND table cells.
+
+    [FIX] Skip only spans the *user* explicitly toggled (rule_id
+    "I-USER-OVERRIDE" from the HTML preview, or "MANUAL" from the
+    interactive resolver). Tool-applied "manual" decisions — e.g.
+    apply_table_answer sets source="manual" with rule_id "I-WORD" —
+    must NOT be skipped, otherwise citations inside counted tables
+    never get excluded (the citation is re-classified back to I-WORD
+    by the table pass, and then the citation pass skips it because
+    source=="manual").
     """
     items = [(c.text, c.source) for c in document.citations if c.text]
     if not items:
@@ -342,6 +242,12 @@ def apply_citation_exclusions(document: Document) -> None:
         if not claimed_ranges:
             continue
         for span in block.spans:
+            # Preserve genuine user decisions (interactive prompts and
+            # HTML preview toggles). Everything else can be re-marked
+            # as a citation.
+            if span.decision_record.rule_id in ("I-USER-OVERRIDE", "MANUAL"):
+                continue
+
             s_start = span.source.char_start
             s_end = span.source.char_end
 
@@ -368,16 +274,7 @@ def apply_citation_exclusions(document: Document) -> None:
                     break
 
 
-# ---------------------------------------------------------------------------
-# Fallback candidate prompting
-# ---------------------------------------------------------------------------
-
 def find_missed_candidates(document: Document) -> list[str]:
-    """Parentheticals containing a 4-digit year that weren't auto-excluded.
-
-    Walks paragraphs AND table cells. Deduplicated by case-insensitive
-    value so the user isn't offered the same string twice.
-    """
     already = {c.text.lower() for c in document.citations}
     candidates: list[str] = []
     seen: set[str] = set()
@@ -398,11 +295,6 @@ def find_missed_candidates(document: Document) -> list[str]:
 
 
 def count_occurrences_in_body(document: Document, needle: str) -> int:
-    """Count case-insensitive occurrences of a substring in countable body.
-
-    Walks paragraphs AND table cells so that manual entries for table
-    citations register the correct occurrence count.
-    """
     if not needle:
         return 0
     total = 0

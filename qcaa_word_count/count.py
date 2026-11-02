@@ -3,25 +3,30 @@ from __future__ import annotations
 
 from collections import defaultdict
 
-from .model import Decision, Document, Table
+from .helpers import classify_span, tokenize
+from .model import Decision, Document, Region, Table
 
 
-def _table_is_in_excluded_region(document: Document, table: Table) -> bool:
-    """True if the block immediately preceding this table is excluded.
+def _table_is_excluded(document: Document, table: Table) -> bool:
+    """True if the table lives in a region QCAA excludes wholesale.
 
-    [FIX 5] Tables were previously counted regardless of region, so a
-    table inside an excluded appendix (or title page) still added its
-    words to the total. `table.block_index` is the block index that
-    the *next* paragraph would have been given, so every block with
-    `block_index < table.block_index` precedes the table.
+    Uses ``table.region`` (assigned by ``regions.assign_table_regions``)
+    instead of the old block-index comparison, which relied on the
+    synthetic 100_000+ indices given to table cells.
+
+    Appendixes are special: the region itself isn't excluded, but the
+    resolver may have decided to exclude it. We read the appendix
+    decision from the first appendix block (the resolver sets them all
+    to the same value, so first is representative).
     """
-    prev = None
-    for block in document.blocks:
-        if block.block_index < table.block_index:
-            prev = block
-        else:
-            break
-    return prev is not None and prev.region_record.decision == Decision.EXCLUDE
+    if table.region in (Region.TITLE_PAGE, Region.CONTENTS,
+                        Region.ABSTRACT, Region.REFERENCES):
+        return True
+    if table.region == Region.APPENDIX:
+        for block in document.blocks:
+            if block.region == Region.APPENDIX:
+                return block.region_record.decision == Decision.EXCLUDE
+    return False
 
 
 def count_words(document: Document) -> dict:
@@ -37,13 +42,28 @@ def count_words(document: Document) -> dict:
 
     for block in document.blocks:
         total_math_objects += block.math_object_count
-        if block.region_record.decision == Decision.EXCLUDE:
-            rule = block.region_record.rule_id or "R-REGION"
-            buckets[f"excluded:{rule}"] += len(block.spans)
-            continue
-        if block.region_record.decision in (Decision.FLAG, Decision.UNDECIDED):
+        dec = block.region_record.decision
+
+        if dec == Decision.EXCLUDE:
+            # Respect manual span overrides inside otherwise-excluded
+            # blocks. If every span is auto-excluded, take the fast path
+            # (whole block to a bucket). If any span was toggled to
+            # count in the HTML preview, fall through and process
+            # span-by-span so the toggled ones are honoured.
+            has_manual_count = any(
+                s.decision_record.source == "manual"
+                and s.decision_record.decision == Decision.COUNT
+                for s in block.spans
+            )
+            if not has_manual_count:
+                rule = block.region_record.rule_id or "R-REGION"
+                buckets[f"excluded:{rule}"] += len(block.spans)
+                continue
+
+        if dec in (Decision.FLAG, Decision.UNDECIDED):
             buckets[f"flagged:{block.region.value}"] += len(block.spans)
             continue
+
         for span in block.spans:
             if span.decision_record.decision == Decision.COUNT:
                 total += 1
@@ -52,20 +72,23 @@ def count_words(document: Document) -> dict:
                 buckets[key] += 1
                 if len(bucket_samples[key]) < 5:
                     bucket_samples[key].append(span.text)
+                if span.decision_record.rule_id == "I-CITATION":
+                    if "citation:manual" in span.tags:
+                        citation_summary["manual_words"] += 1
+                    else:
+                        citation_summary["auto_words"] += 1
 
     for table in document.tables:
-        # [FIX 5] Skip tables that live inside an excluded region.
-        if _table_is_in_excluded_region(document, table):
+        if _table_is_excluded(document, table):
+            n_cells = sum(len(c.spans) for c in table.iter_cells())
             table_summary.append({
                 "index": table.table_index + 1,
                 "suggestion": table.suggestion.value,
                 "answer": "excluded (region)",
                 "counted": 0,
-                "excluded": sum(len(c.spans) for c in table.iter_cells()),
+                "excluded": n_cells,
             })
-            buckets["table:excluded (in excluded region)"] += sum(
-                len(c.spans) for c in table.iter_cells()
-            )
+            buckets["table:excluded (in excluded region)"] += n_cells
             continue
 
         counted = excluded = 0
@@ -89,27 +112,29 @@ def count_words(document: Document) -> dict:
             buckets[f"table:{answer_label}"] += excluded
 
     for fn in document.footnotes:
+        tokens = tokenize(fn.text)
         if fn.answer == "count":
-            total += len(fn.text.split())
+            counted = 0
+            for tok in tokens:
+                _, rec = classify_span(tok)
+                if rec.decision == Decision.COUNT:
+                    counted += 1
+                else:
+                    key = f"excluded:footnote-{rec.rule_id or 'unknown'}"
+                    buckets[key] += 1
+                    if len(bucket_samples[key]) < 5:
+                        bucket_samples[key].append(tok)
+            total += counted
             footnote_summary["counted"] += 1
-            footnote_summary["counted_words"] += len(fn.text.split())
+            footnote_summary["counted_words"] += counted
         elif fn.answer == "exclude":
-            buckets["footnotes (bibliographic)"] += len(fn.text.split())
+            buckets["footnotes (bibliographic)"] += len(tokens)
             footnote_summary["excluded"] += 1
-            footnote_summary["excluded_words"] += len(fn.text.split())
+            footnote_summary["excluded_words"] += len(tokens)
         else:
             unresolved_footnotes += 1
-            buckets["footnotes (unresolved — not counted)"] += len(fn.text.split())
+            buckets["footnotes (unresolved — not counted)"] += len(tokens)
 
-    for block in document.blocks:
-        if block.region_record.decision == Decision.EXCLUDE:
-            continue
-        for span in block.spans:
-            if span.decision_record.rule_id == "I-CITATION":
-                if "citation:manual" in span.tags:
-                    citation_summary["manual_words"] += 1
-                else:
-                    citation_summary["auto_words"] += 1
     citation_summary["auto"] = sum(1 for c in document.citations if c.source == "auto")
     citation_summary["manual"] = sum(1 for c in document.citations if c.source == "manual")
 
@@ -122,5 +147,5 @@ def count_words(document: Document) -> dict:
         "footnotes": footnote_summary,
         "math_objects": total_math_objects,
         "unresolved_footnotes": unresolved_footnotes,
-        "stated_count": None,   # filled in by pipeline.extract_stated_count
+        "stated_count": None,
     }

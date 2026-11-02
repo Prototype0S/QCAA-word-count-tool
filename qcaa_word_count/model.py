@@ -100,6 +100,11 @@ class DecisionRecord:
     auto_confidence: Optional[float] = None
 
     def as_manual_override(self, new_decision: Decision, reason: str = "") -> None:
+        """Record a user override. The first auto-state is preserved
+        in the ``auto_*`` fields; subsequent calls do not overwrite
+        them (so ``auto_decision`` always reflects what the tool
+        originally thought).
+        """
         if self.source == "auto":
             self.auto_decision = self.decision
             self.auto_rule_id = self.rule_id
@@ -146,6 +151,8 @@ class Block:
     style_name: Optional[str] = None
     math_object_count: int = 0
     raw_text: str = ""
+    # Set by captions.detect_captions when the block "looks like a
+    # caption". Consumed by interactive.resolve_captions.
     is_visual: bool = False
 
     @property
@@ -171,7 +178,13 @@ class Block:
 class Table:
     rows: list[list[Block]] = field(default_factory=list)
     table_index: int = 0
+    # block_index of the paragraph that *would* follow the table — i.e.
+    # the insertion point. Used to interleave tables and blocks in
+    # document order.
     block_index: int = 0
+    # Region of the most recent preceding block. Assigned by
+    # regions.assign_table_regions().
+    region: Region = Region.BODY
 
     suggestion: TableClass = TableClass.AMBIGUOUS
     suggestion_confidence: float = 0.0

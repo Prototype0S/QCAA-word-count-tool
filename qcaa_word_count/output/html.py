@@ -67,11 +67,13 @@ def _span_html(span: Span) -> str:
     dec = span.decision_record.decision
     rule = span.decision_record.rule_id or ""
     reason = span.decision_record.reason or ""
+    conf = span.decision_record.confidence
     dec_attr = html.escape(dec.value if hasattr(dec, "value") else str(dec))
     rule_attr = html.escape(rule)
     reason_attr = html.escape(reason)
     text_attr = html.escape(span.text)
     origin_attr = "1" if dec == Decision.COUNT else "0"
+    conf_attr = f"{conf:.2f}" if conf is not None else ""
     sid = _span_id(span)
     meta = (
         f' data-span-id="{sid}"'
@@ -80,6 +82,7 @@ def _span_html(span: Span) -> str:
         f' data-reason="{reason_attr}"'
         f' data-text="{text_attr}"'
         f' data-original-counted="{origin_attr}"'
+        f' data-confidence="{conf_attr}"'
     )
 
     if dec == Decision.COUNT:
@@ -152,19 +155,45 @@ def _table_html(table) -> str:
         "headers_only": "headers only",
         "unresolved": "unresolved",
     }.get(answer, answer)
+
+    table_counts = answer in ("count_all", "headers_only")
+    origin_attr = "1" if table_counts else "0"
+    caption_class = "count" if table_counts else "exclude"
+
+    tooltip_decision = "count" if table_counts else "exclude"
+    tooltip_reason = (
+        "Whole table counted (per-table decision)" if table_counts
+        else "Whole table excluded (per-table decision)"
+    )
+
+    # The answer label appears exactly once, in the badge. The toggle
+    # text stays generic ("Table N") so it doesn't repeat the state.
+    caption = (
+        f'<caption class="caption">'
+        f'<span class="table-toggle {caption_class}" '
+        f'data-table-toggle="1" '
+        f'data-table-index="{table.table_index}" '
+        f'data-original-counted="{origin_attr}" '
+        f'data-decision="{tooltip_decision}" '
+        f'data-rule="T-USER-TOGGLE" '
+        f'data-reason="{html.escape(tooltip_reason)}" '
+        f'data-confidence="1.00">'
+        f'Table {table.table_index + 1} '
+        f'<span style="font-size:.75rem;opacity:.7">'
+        f'(Ctrl+click to toggle)</span>'
+        f'</span>'
+        f'<span class="badge {answer_badge}"> {answer_label}</span>'
+        f'</caption>'
+    )
+
     return (
         f'<table>'
-        f'<caption class="caption">'
-        f'Table {table.table_index + 1} '
-        f'<span class="badge {answer_badge}">{answer_label}</span>'
-        f'</caption>'
+        f'{caption}'
         f'{"".join(rows)}'
         f'</table>'
     )
-
-
 # ---------------------------------------------------------------------------
-# Statistics block (unchanged from before — kept for completeness)
+# Statistics block
 # ---------------------------------------------------------------------------
 
 def _build_statistics_html(stats: dict, result: dict) -> str:
@@ -290,6 +319,44 @@ def _build_summary_text(document: Document, result: dict) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Confidence aggregation
+# ---------------------------------------------------------------------------
+
+def _confidence_summary(document: Document) -> tuple[int, int, int]:
+    """Return (average_pct, low_conf_count, total_decisions).
+
+    A decision with confidence < 0.70 is considered "low" — those are
+    the ones the tool is guessing about and the user may want to review
+    with Ctrl+click.
+    """
+    confidences = []
+    for block in document.blocks:
+        for span in block.spans:
+            c = span.decision_record.confidence
+            if c is not None:
+                confidences.append(c)
+    for table in document.tables:
+        for cell in table.iter_cells():
+            for span in cell.spans:
+                c = span.decision_record.confidence
+                if c is not None:
+                    confidences.append(c)
+    if not confidences:
+        return 100, 0, 0
+    avg_pct = round(sum(confidences) / len(confidences) * 100)
+    low_count = sum(1 for c in confidences if c < 0.70)
+    return avg_pct, low_count, len(confidences)
+
+def _table_override_payload(document: Document) -> dict:
+    """Serialize table-level toggle state for the 'Save overrides' JSON."""
+    out = {}
+    for table in document.tables:
+        if table.answer is None:
+            continue
+        out[str(table.table_index)] = table.answer.value
+    return out
+
+# ---------------------------------------------------------------------------
 # Top-level builders
 # ---------------------------------------------------------------------------
 
@@ -302,7 +369,39 @@ def build_html_preview(document: Document, result: dict) -> str:
             body.append(_table_html(obj))
     body_html = "\n".join(body) or "<p><em>(No content)</em></p>"
 
+    # Confidence summary (shown in the FINAL WORD COUNT panel)
+    avg_conf, low_conf, _ = _confidence_summary(document)
+    # Reading time: 200 wpm (standard reading pace).
+    reading_minutes = max(1, round(result["total"] / 200))
+
     stats_rows = []
+    stats_rows.append(
+        f'<dt>Reading time</dt><dd>about {reading_minutes} '
+        f'minute{"s" if reading_minutes != 1 else ""}</dd>'
+    )
+    # Confidence state: high ≥85, mid ≥70, low <70
+    if avg_conf >= 85:
+        conf_class = "high"
+    elif avg_conf >= 70:
+        conf_class = "mid"
+    else:
+        conf_class = "low"
+
+    stats_rows.append(
+        f'<dt>Tool confidence</dt>'
+        f'<dd>'
+        f'<span class="confidence-meter conf-{conf_class}" '
+        f'title="Average over all span decisions">'
+        f'<span class="confidence-fill" style="width:{avg_conf}%"></span>'
+        f'</span> '
+        f'<span class="confidence-pct conf-{conf_class}">{avg_conf}%</span>'
+        + (
+            f' <span style="color:var(--grey);font-size:.8rem;">'
+            f'({low_conf} low-confidence)</span>'
+            if low_conf else ''
+        )
+        + f'</dd>'
+    )
     for key, count in sorted(result["buckets"].items()):
         stats_rows.append(
             f'<dt>{html.escape(key)}</dt><dd>{count} word(s)</dd>'
@@ -389,6 +488,9 @@ def build_html_preview(document: Document, result: dict) -> str:
         "additional_panels": additional,
         "summary_json": summary_json,
         "original_total": str(result["total"]),
+        "reading_minutes": str(reading_minutes),
+        "avg_confidence": str(avg_conf),
+        "table_answers": json.dumps(_table_override_payload(document)),
     })
 
 

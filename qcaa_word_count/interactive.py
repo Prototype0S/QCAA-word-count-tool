@@ -17,9 +17,6 @@ from .tables import (
     apply_table_answer, suggest_table_answer, table_has_strong_default,
 )
 
-# [FIX 5] Resolver prompt injection — every resolver accepts a `prompt`
-# callable. Default is `_menu`. Tests can pass a lambda to skip the
-# terminal entirely.
 PromptFn = Callable[[str, list[tuple[str, str]], str | None], str]
 
 
@@ -97,13 +94,11 @@ def _menu(question: str, options: list[tuple[str, str]],
         try:
             raw = input(f"\n{bold('Your choice')}{default_hint}: ").strip()
         except EOFError:
-            # EOF (piped input ended) = use default if available
             if default_key is not None:
                 return default_key
             print(red("\nNo input."))
             sys.exit(1)
         except KeyboardInterrupt:
-            # [FIX 6] Ctrl+C aborts the program, not just re-prompts
             print()
             print(grey("Aborted."))
             sys.exit(130)
@@ -445,7 +440,14 @@ def resolve_footnotes(document: Document, auto_accept: bool) -> bool:
 # Citations
 # ---------------------------------------------------------------------------
 
-def resolve_citations(document: Document) -> None:
+def resolve_citations(document: Document, auto_accept: bool = False) -> None:
+    """Detect APA 7 in-text citations, then optionally prompt for
+    missed candidates.
+
+    In auto_accept mode (summary / include-all / preview) the missed-
+    candidate prompt is skipped, because those modes must not require
+    input. Auto-detected citations are still excluded.
+    """
     _panel("Citation detection", "(APA 7)")
     auto = [c for c in document.citations if c.source == "auto"]
     if auto:
@@ -458,7 +460,7 @@ def resolve_citations(document: Document) -> None:
     apply_citation_exclusions(document)
 
     missed = find_missed_candidates(document)
-    if not missed:
+    if not missed or auto_accept:
         return
 
     print()
@@ -485,7 +487,6 @@ def resolve_citations(document: Document) -> None:
         except EOFError:
             break
         except KeyboardInterrupt:
-            # [FIX 6] Ctrl+C aborts the program here too
             print()
             print(grey("Aborted."))
             sys.exit(130)
@@ -531,4 +532,4 @@ def resolve_all(document: Document, auto_accept: bool = False) -> None:
     auto_accept = resolve_tables(document, auto_accept)
     auto_accept = resolve_captions(document, auto_accept)
     auto_accept = resolve_footnotes(document, auto_accept)
-    resolve_citations(document)
+    resolve_citations(document, auto_accept=auto_accept)

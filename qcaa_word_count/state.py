@@ -1,12 +1,29 @@
 """Save and load decisions across runs.
 
-[FIX 8] The old loader matched saved blocks by *block_index* and
-verified with a text hash. That meant inserting a paragraph in the
-middle of the document shifted every subsequent block's index, and
-every decision after the insertion was silently discarded.
+SAVE FORMAT
+-----------
+    {
+      "version": 2,
+      "blocks": [
+        {
+          "text_hash": "<sha1[:16]>",
+          "region": "<Region.value>",
+          "occurrence": <int>,
+          "decision": "count" | "exclude",
+          "rule_id": "...",
+          "reason": "..."
+        }, ...
+      ],
+      "tables": [...],
+      "footnotes": [...],
+      "citations_manual": [...],
+      "sections": [...]
+    }
 
-This version matches by *text hash alone*. A block whose text hasn't
-changed gets its decision back, regardless of where it moved to.
+Block identity is (text_hash, region, occurrence) where `occurrence`
+disambiguates identical blocks in the same region (e.g. two "Figure 1"
+captions in the body). Old saves (version 1, no region/occurrence)
+still load, with a one-off message.
 """
 from __future__ import annotations
 
@@ -16,12 +33,14 @@ import os
 from pathlib import Path
 from typing import Optional
 
+from .helpers import apply_span_decisions_for_block
 from .model import (
-    Block, Citation, Decision, DecisionRecord, Document, Table, TableAnswer,
+    Block, Citation, Decision, DecisionRecord, Document, Region, Table,
+    TableAnswer,
 )
 from .tables import apply_table_answer
 
-SAVE_VERSION = 1
+SAVE_VERSION = 2
 
 
 def _hash_text(text: str) -> str:
@@ -29,7 +48,6 @@ def _hash_text(text: str) -> str:
 
 
 def _table_hash(table: Table) -> str:
-    """Hash a table's full text so we can match it across edits."""
     chunks = []
     for row in table.rows:
         for cell in row:
@@ -42,7 +60,6 @@ def _footnote_hash(fn) -> str:
 
 
 def default_save_path(docx_path: str) -> str:
-    """The default JSON path next to the .docx file."""
     base = os.path.splitext(docx_path)[0]
     return f"{base}_qcaa_decisions.json"
 
@@ -50,18 +67,26 @@ def default_save_path(docx_path: str) -> str:
 def save_decisions(document: Document, docx_path: str,
                    save_path: Optional[str] = None,
                    total: Optional[int] = None) -> str:
-    """Write the current decision state to JSON. Returns the path written."""
     if save_path is None:
         save_path = default_save_path(docx_path)
 
+    # Build (text_hash, region) -> occurrence index for manually-overridden
+    # blocks, so load can restore the *right* identical block.
+    from collections import defaultdict
+    counters: dict[tuple[str, str], int] = defaultdict(int)
+
     blocks = []
     for b in document.blocks:
-        # Only save blocks that carry a *non-default* decision.
         if b.region_record.source != "manual":
             continue
+        h = _hash_text(b.text)
+        key = (h, b.region.value)
+        occurrence = counters[key]
+        counters[key] += 1
         blocks.append({
-            "block_index": b.block_index,
-            "text_hash": _hash_text(b.text),
+            "text_hash": h,
+            "region": b.region.value,
+            "occurrence": occurrence,
             "decision": b.region_record.decision.value,
             "rule_id": b.region_record.rule_id,
             "reason": b.region_record.reason,
@@ -72,7 +97,6 @@ def save_decisions(document: Document, docx_path: str,
         if t.answer is None:
             continue
         tables.append({
-            "table_index": t.table_index,
             "text_hash": _table_hash(t),
             "answer": t.answer.value,
         })
@@ -87,7 +111,6 @@ def save_decisions(document: Document, docx_path: str,
             "answer": fn.answer,
         })
 
-    # Persist manually-added citations so they survive re-runs.
     citations_manual = [
         {"text": c.text, "occurrences": c.occurrences}
         for c in document.citations if c.source == "manual"
@@ -113,16 +136,6 @@ def save_decisions(document: Document, docx_path: str,
 
 
 def load_decisions(document: Document, load_path: str) -> dict:
-    """Restore decisions from JSON where they still match.
-
-    [FIX 8] Blocks are matched by text hash, not by block_index, so
-    inserting a paragraph earlier in the document doesn't discard
-    every saved decision that came after it.
-
-    Tables are also matched by hash (index is unreliable after edits).
-    Footnotes are matched by ID + hash, because footnote IDs are
-    stable within a document.
-    """
     stats = {"restored": 0, "skipped": 0, "mismatched": 0, "loaded": False}
 
     try:
@@ -130,20 +143,50 @@ def load_decisions(document: Document, load_path: str) -> dict:
     except (FileNotFoundError, json.JSONDecodeError, OSError):
         return stats
 
-    if payload.get("version") != SAVE_VERSION:
+    version = payload.get("version")
+    if version not in (1, 2):
         return stats
 
     stats["loaded"] = True
 
-    # --- Blocks: match by text hash -----------------------------------
-    # A document with two identical blocks (two "Introduction" headings,
-    # two "Figure 1" captions) matches the saved entry to whichever one
-    # is found first, then deletes it from the pool so the same saved
-    # entry isn't applied twice.
+    if version == 1:
+        _load_v1_blocks(document, payload, stats)
+    else:
+        _load_v2_blocks(document, payload, stats)
+
+    _load_tables(document, payload, stats)
+    _load_footnotes(document, payload, stats)
+
+    for saved in payload.get("citations_manual", []):
+        document.citations.append(Citation(
+            text=saved["text"],
+            occurrences=saved.get("occurrences", 0),
+            source="manual",
+        ))
+
+    return stats
+
+
+def _apply_block_decision(block: Block, decision: Decision,
+                          rule_id: str, reason: str) -> None:
+    block.region_record = DecisionRecord(
+        decision=decision,
+        rule_id=rule_id or "MANUAL",
+        confidence=1.0,
+        reason=reason or "Restored from saved decisions",
+        source="manual",
+    )
+    # Re-classify spans so the count reflects the restored decision.
+    # Without this, a restored "count this References block" would
+    # still have its spans marked R-REGION (excluded).
+    apply_span_decisions_for_block(block)
+
+
+def _load_v1_blocks(document: Document, payload: dict, stats: dict) -> None:
+    """Legacy: hash-only matching. Same collision behaviour as before."""
     blocks_by_hash: dict[str, Block] = {}
     for b in document.blocks:
         h = _hash_text(b.text)
-        # Keep the first occurrence of each hash.
         if h not in blocks_by_hash:
             blocks_by_hash[h] = b
 
@@ -158,16 +201,45 @@ def load_decisions(document: Document, load_path: str) -> dict:
         except (KeyError, ValueError):
             stats["skipped"] += 1
             continue
-        block.region_record = DecisionRecord(
-            decision=decision,
-            rule_id=saved.get("rule_id") or "MANUAL",
-            confidence=1.0,
-            reason=saved.get("reason") or "Restored from saved decisions",
-            source="manual",
+        _apply_block_decision(
+            block, decision, saved.get("rule_id"), saved.get("reason"),
         )
         stats["restored"] += 1
 
-    # --- Tables: match by text hash -----------------------------------
+
+def _load_v2_blocks(document: Document, payload: dict, stats: dict) -> None:
+    """New: match by (text_hash, region, occurrence)."""
+    from collections import defaultdict
+    blocks_by_key: dict[tuple[str, str], list[Block]] = defaultdict(list)
+    for b in document.blocks:
+        key = (_hash_text(b.text), b.region.value)
+        blocks_by_key[key].append(b)
+
+    for saved in payload.get("blocks", []):
+        h = saved.get("text_hash")
+        region = saved.get("region")
+        if not h or not region:
+            stats["skipped"] += 1
+            continue
+        key = (h, region)
+        candidates = blocks_by_key.get(key, [])
+        occurrence = saved.get("occurrence", 0)
+        if occurrence >= len(candidates):
+            stats["skipped"] += 1
+            continue
+        block = candidates[occurrence]
+        try:
+            decision = Decision(saved["decision"])
+        except (KeyError, ValueError):
+            stats["skipped"] += 1
+            continue
+        _apply_block_decision(
+            block, decision, saved.get("rule_id"), saved.get("reason"),
+        )
+        stats["restored"] += 1
+
+
+def _load_tables(document: Document, payload: dict, stats: dict) -> None:
     tables_by_hash: dict[str, Table] = {}
     for t in document.tables:
         h = _table_hash(t)
@@ -192,7 +264,8 @@ def load_decisions(document: Document, load_path: str) -> dict:
         )
         stats["restored"] += 1
 
-    # --- Footnotes: match by ID + hash --------------------------------
+
+def _load_footnotes(document: Document, payload: dict, stats: dict) -> None:
     fns_by_id = {fn.footnote_id: fn for fn in document.footnotes}
     for saved in payload.get("footnotes", []):
         fid = saved.get("footnote_id")
@@ -209,16 +282,6 @@ def load_decisions(document: Document, load_path: str) -> dict:
             continue
         fn.answer = answer
         stats["restored"] += 1
-
-    # --- Manual citations --------------------------------------------
-    for saved in payload.get("citations_manual", []):
-        document.citations.append(Citation(
-            text=saved["text"],
-            occurrences=saved.get("occurrences", 0),
-            source="manual",
-        ))
-
-    return stats
 
 
 def _safe_mtime(path: str) -> float:

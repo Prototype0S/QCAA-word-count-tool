@@ -1,4 +1,4 @@
-"""Structure detection: assign a Region to each block."""
+"""Structure detection: assign a Region to each block and table."""
 from __future__ import annotations
 
 import re
@@ -24,20 +24,17 @@ SECTION_TRIGGERS = {
 
 
 def detect_regions(document: Document) -> None:
-    # [FIX 8] Walk the opening blocks and stop the TITLE_PAGE region
-    # at the first block that looks like body prose. A Word heading
-    # still ends the title page (as before); so does substantial prose.
+    # Walk the opening blocks and stop the TITLE_PAGE region at the
+    # first block that looks like body prose. A Word heading still
+    # ends the title page; so does substantial prose.
     #
-    # [FIX 16] Look ahead one block. If a block would be classified as
+    # Look ahead one block: if a block would be classified as
     # TITLE_PAGE but the *next* block is prose, this block is the
-    # opening line of the body, not a title-page line. A title page
-    # cannot "resume" after prose, so anything directly before the
-    # first prose block is prose too.
+    # opening line of the body, not a title-page line.
     current_region = Region.BODY
     current_level: int | None = None
     in_title_page = True
 
-    # Precompute prose verdicts so the lookahead doesn't re-run the regex.
     prose_flags = [_looks_like_body_prose(b.text) for b in document.blocks]
 
     for idx, block in enumerate(document.blocks):
@@ -47,14 +44,12 @@ def detect_regions(document: Document) -> None:
         if in_title_page:
             if block.block_type == BlockType.HEADING:
                 in_title_page = False
-                # fall through to heading handling below
             elif prose_flags[idx]:
                 in_title_page = False
                 block.region = Region.BODY
                 current_region = Region.BODY
                 continue
             else:
-                # [FIX 16] Lookahead: opening prose block.
                 next_is_prose = (
                     idx + 1 < len(document.blocks)
                     and document.blocks[idx + 1].block_type != BlockType.HEADING
@@ -86,6 +81,29 @@ def detect_regions(document: Document) -> None:
     _detect_trailing_references(document)
 
 
+def assign_table_regions(document: Document) -> None:
+    """Assign each table the region of the most recent preceding block.
+
+    Must be called *after* ``detect_regions`` and *after* block regions
+    have been finalised. Replaces the earlier block-index comparison in
+    count.py, which relied on the accidental ordering of synthetic
+    table-cell indices.
+    """
+    items: list[tuple[int, int, str, object]] = []
+    for b in document.blocks:
+        items.append((b.block_index, 1, "block", b))
+    for t in document.tables:
+        items.append((t.block_index, 0, "table", t))
+    items.sort(key=lambda x: (x[0], x[1]))
+
+    current_region = Region.BODY
+    for _, _, kind, obj in items:
+        if kind == "block":
+            current_region = obj.region  # type: ignore[union-attr]
+        else:
+            obj.region = current_region  # type: ignore[union-attr]
+
+
 _SENTENCE_END_RE = re.compile(r"[.!?](?:\s|$)")
 _STATED_COUNT_LINE_RE = re.compile(
     r"(?:word\s*count|word\s*length)\s*[:\-]\s*\d",
@@ -103,7 +121,7 @@ def _looks_like_body_prose(text: str) -> bool:
     if not t:
         return False
     if _STATED_COUNT_LINE_RE.search(t):
-        return False   # "Word count: 1500" is a title-page line
+        return False
     sentences = len(_SENTENCE_END_RE.findall(t))
     words = len(t.split())
     if sentences >= 2:
@@ -117,11 +135,6 @@ _APA_AUTHOR_START_RE = re.compile(
     r"^\s*[A-Z][A-Za-z'’\-]+(?:\s*,\s*[A-Z]\.?)+\s*\(\s*(?:19|20)\d{2}[a-z]?\s*\)",
 )
 
-# [FIX 12a] Student-format author (year) at the start of a block.
-#   Australian Bureau of Statistics (2026). ...
-#   Smith (2020). The title. ...
-#   Smith and Jones (2020). ...
-#   Smith, J., & Jones, B. (2020). ...
 _REFERENCE_AUTHOR_YEAR_RE = re.compile(
     r"^\s*[A-Z][A-Za-z'’\-]+"
     r"(?:\s*,\s*[A-Z]\.?)?"
@@ -137,8 +150,6 @@ _URL_LIKE_RE = re.compile(
     re.IGNORECASE,
 )
 
-# Counts distinct URL *starts* rather than every fragment the broader
-# _URL_LIKE_RE matches. One URL contributes 1 here, not 2.
 _URL_START_RE = re.compile(r"https?://|www\.", re.IGNORECASE)
 
 _REFERENCE_HINT_RE = re.compile(
@@ -156,11 +167,6 @@ def _looks_like_reference(text: str) -> bool:
     Principle: when in doubt, treat as a reference. A missed reference
     entry costs 30-80 words; a wrongly-excluded prose paragraph costs
     maybe 20. Bias toward exclusion.
-
-    [FIX 12c] The sentence-ending guard is *only* applied in the
-    no-URL branch, and only when a year+hint pair is present. Reference
-    entries routinely contain 4-6 periods (page ranges, "[Data set].",
-    stray punctuation) so an unconditional guard rejects them.
     """
     text = text.strip()
     if not text:
@@ -170,13 +176,8 @@ def _looks_like_reference(text: str) -> bool:
     if _URL_LIKE_RE.search(text):
         url_starts = len(_URL_START_RE.findall(text))
         sentences = len(_SENTENCE_END_RE.findall(text))
-        # Two or more URLs — treat as reference unconditionally.
-        # Covers the "pasted whole reference list as one paragraph" case.
         if url_starts >= 2:
             return True
-        # One URL and a compact block — reference entry.
-        # Allow up to 6 sentence endings so [Data set]. and stray
-        # periods inside an entry don't disqualify it.
         if sentences <= 6:
             return True
         return False
@@ -190,8 +191,6 @@ def _looks_like_reference(text: str) -> bool:
     has_year = bool(re.search(r"\(\s*(?:19|20)\d{2}[a-z]?\s*\)", text))
     has_hint = bool(_REFERENCE_HINT_RE.search(text))
     if has_year and has_hint:
-        # Year + bibliographic keyword, no URL. Apply a sentence
-        # guard only here — without a URL this is a weaker signal.
         if len(_SENTENCE_END_RE.findall(text)) > 4:
             return False
         return True
@@ -200,12 +199,7 @@ def _looks_like_reference(text: str) -> bool:
 
 
 def _detect_trailing_references(document: Document) -> None:
-    """Mark consecutive reference-like blocks at the end of the body.
-
-    Walks backwards and stops at the first non-reference once it has
-    started, so a 40-entry reference list is caught in full. A single
-    stray reference-like block is not marked (needs >= 2).
-    """
+    """Mark consecutive reference-like blocks at the end of the body."""
     body_blocks = [b for b in document.blocks if b.region == Region.BODY]
     if not body_blocks:
         return
