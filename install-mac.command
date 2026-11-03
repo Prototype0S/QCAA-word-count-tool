@@ -1,123 +1,192 @@
-#!/usr/bin/env bash
-# QCAA Word Count Tool — macOS launcher
-# Double-click this file in Finder to set up and run the tool.
-# The first run installs Python dependencies; subsequent runs just launch.
+#!/bin/bash
+# ============================================================
+#  QCAA Word Count Tool — macOS launcher
+#
+#  Double-click in Finder to set up and run.
+#  First run creates .venv and installs python-docx; later runs
+#  go straight to the tool.
+# ============================================================
 
-set -e
-cd "$(dirname "$0")"
+cd "$(dirname "$0")" || {
+    echo "ERROR: could not change to the script's folder."
+    exit 1
+}
 
-# ---------------------------------------------------------------------------
-# Pretty banner
-# ---------------------------------------------------------------------------
+pause() {
+    if [ -t 0 ]; then
+        if [ -n "${BASH_VERSION:-}" ]; then
+            read -n 1 -s -r -p "Press any key to close..." _ || true
+        else
+            read -r -p "Press Enter to close..." _ || true
+        fi
+        echo
+    fi
+}
+
+fail() {
+    echo
+    echo "ERROR: $*"
+    echo
+    pause
+    exit 1
+}
+
+# --- macOS 15+ Gatekeeper check -------------------------------------
+# On Sequoia and later, the old "right-click → Open" bypass is gone.
+# If this file has the quarantine attribute, tell the user the exact
+# steps that work now.
+if xattr -l "$0" 2>/dev/null | grep -q "com.apple.quarantine"; then
+    echo
+    echo "============================================================"
+    echo "  macOS SECURITY NOTICE"
+    echo "============================================================"
+    echo
+    echo "This launcher was downloaded from the internet and macOS"
+    echo "has quarantined it. The old 'right-click → Open' method"
+    echo "NO LONGER WORKS on macOS 15 (Sequoia) and later."
+    echo
+    echo "To run it:"
+    echo "  1. Double-click this file and click 'Done' in the warning"
+    echo "     (do NOT click 'Move to Trash')."
+    echo "  2. Open System Settings → Privacy & Security."
+    echo "  3. Scroll to the Security section."
+    echo "  4. Click 'Open Anyway' next to this file."
+    echo "  5. Enter your Mac password when asked."
+    echo
+    echo "Alternatively, open Terminal and run:"
+    echo "  xattr -cr \"$0\""
+    echo "Then double-click this file again."
+    echo
+    pause
+    exit 1
+fi
+
+# --- Executable bit check -------------------------------------------
+# If the file arrived via a Windows zip, it won't be executable and
+# Finder will open it in TextEdit instead of running it.
+if [ ! -x "$0" ]; then
+    echo
+    echo "============================================================"
+    echo "  PERMISSION FIX NEEDED"
+    echo "============================================================"
+    echo
+    echo "This launcher is not marked as executable, so macOS"
+    echo "won't run it. Fix it with one command in Terminal:"
+    echo
+    echo "  chmod +x \"$0\""
+    echo
+    echo "Then double-click this file again."
+    echo
+    pause
+    exit 1
+fi
+
 echo
 echo "============================================================"
 echo "  QCAA WORD COUNT TOOL"
 echo "============================================================"
 echo
 
-# ---------------------------------------------------------------------------
-# Warn if running from Downloads or a temporary folder
-# ---------------------------------------------------------------------------
+[ -f "qcaa_word_count.py" ] || fail "qcaa_word_count.py is missing. Keep this launcher in the same folder as the tool."
+[ -d "qcaa_word_count" ] || fail "The qcaa_word_count/ package folder is missing. Keep the whole folder together."
+
 case "$(pwd)" in
-    */Downloads/*|*/Downloads|/tmp/*|*/Temp/*)
-        echo "NOTE: You're running this from Downloads or a temporary folder."
-        echo "      Move the whole folder to Documents first (e.g."
-        echo "      ~/Documents/qcaa-word-count) and run again."
+    */Downloads|*/Downloads/*|/tmp/*|*/Temp/*)
+        echo "NOTE: This folder is in Downloads or a temporary location."
+        echo "      Move it to Documents so the virtual environment is kept."
         echo
         ;;
 esac
 
-# ---------------------------------------------------------------------------
-# Find a suitable Python (3.10+, prefer 3.15)
-# ---------------------------------------------------------------------------
-# Try the newest first so anyone with 3.15 installed gets it automatically.
-PYTHON_BIN=""
-for candidate in python3.15 python3.14 python3.13 python3.12 python3.11 python3.10 python3 python; do
+# --- Find Python 3.10+ ----------------------------------------------
+PY=""
+for candidate in \
+    python3.15 python3.14 python3.13 python3.12 python3.11 python3.10 \
+    python3 python \
+    /usr/local/bin/python3 \
+    /opt/homebrew/bin/python3 \
+    /Library/Frameworks/Python.framework/Versions/Current/bin/python3
+do
     if command -v "$candidate" >/dev/null 2>&1; then
-        if "$candidate" -c "import sys; sys.exit(0 if sys.version_info >= (3,10) else 1)" >/dev/null 2>&1; then
-            PYTHON_BIN="$candidate"
+        if "$candidate" -c 'import sys; raise SystemExit(0 if sys.version_info >= (3,10) else 1)' >/dev/null 2>&1; then
+            PY="$(command -v "$candidate")"
             break
         fi
     fi
 done
 
-if [ -z "$PYTHON_BIN" ]; then
-    echo "ERROR: Python 3.10 or newer was not found."
+if [ -z "$PY" ]; then
+    echo "Python 3.10 or newer was not found."
     echo
-    echo "  RECOMMENDED: Python 3.15 (much faster for this tool)"
-    echo "  Download:    https://www.python.org/downloads/release/python-3150/"
-    echo "               (pick the macOS installer, 10.15+)"
+    echo "  Install Python 3.15 (current stable) from:"
+    echo "      https://www.python.org/downloads/"
     echo
-    echo "  1. Run the installer."
-    echo "  2. Double-click this file again."
+    echo "  The python.org installer includes tkinter, so the file"
+    echo "  picker will work without any extra setup."
     echo
-    echo "Alternative (if you use Homebrew): brew install python@3.15"
-    echo
-    read -n 1 -s -r -p "Press any key to close..."
-    echo
+    pause
     exit 1
 fi
 
-PYVER=$("$PYTHON_BIN" -c "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}')")
-echo "Found Python $PYVER ($PYTHON_BIN)"
+PYVER="$("$PY" -c 'import sys; print("%d.%d.%d" % sys.version_info[:3])')"
+echo "Found Python $PYVER ($PY)"
 
-# ---------------------------------------------------------------------------
-# Soft-recommend 3.15 (works on 3.10+, faster on 3.15)
-# ---------------------------------------------------------------------------
-if ! "$PYTHON_BIN" -c "import sys; sys.exit(0 if sys.version_info >= (3,15) else 1)" >/dev/null 2>&1; then
-    echo
-    echo "NOTE: You're on Python $PYVER. The tool works, but 3.15 is"
-    echo "      noticeably faster. If you want the speedup, upgrade from:"
-    echo "      https://www.python.org/downloads/release/python-3150/"
-    echo
-fi
+# --- Create / repair the virtual environment ------------------------
+VENV_PY=".venv/bin/python"
+venv_ok() {
+    [ -x "$VENV_PY" ] && "$VENV_PY" -c 'import sys' >/dev/null 2>&1
+}
 
-# ---------------------------------------------------------------------------
-# Create the virtual environment if needed
-# ---------------------------------------------------------------------------
-if [ ! -x ".venv/bin/python" ]; then
+if ! venv_ok; then
     echo "Setting up virtual environment..."
-    "$PYTHON_BIN" -m venv .venv
-    if [ $? -ne 0 ]; then
-        echo "ERROR: Could not create the virtual environment."
-        read -n 1 -s -r -p "Press any key to close..."
-        echo
-        exit 1
+    rm -rf .venv
+    if ! "$PY" -m venv .venv; then
+        fail "Could not create the virtual environment.
+  Homebrew users: run 'brew install python' (includes venv/pip).
+  Otherwise reinstall Python from https://www.python.org/downloads/"
+    fi
+    venv_ok || fail "The virtual environment was created but is not usable.
+  Delete the .venv folder and run this launcher again."
+fi
+
+# --- Install dependencies -------------------------------------------
+# docx.opc exists only in the real python-docx package.
+if ! "$VENV_PY" -c 'import docx, docx.opc' >/dev/null 2>&1; then
+    echo "Installing dependencies (python-docx)..."
+    "$VENV_PY" -m pip install --quiet --upgrade pip >/dev/null 2>&1 || true
+    if ! "$VENV_PY" -m pip install --quiet python-docx; then
+        fail "Could not install python-docx.
+  Check your internet connection. On a school network, PyPI may be
+  blocked; try a phone hotspot or ask IT for the proxy address."
     fi
 fi
 
-# ---------------------------------------------------------------------------
-# Install dependencies if needed
-# ---------------------------------------------------------------------------
-if ! .venv/bin/python -c "import docx" >/dev/null 2>&1; then
-    echo "Installing dependencies..."
-    .venv/bin/python -m pip install --quiet --upgrade pip
-    if ! .venv/bin/python -m pip install --quiet python-docx; then
-        echo
-        echo "ERROR: Could not install python-docx."
-        echo
-        echo "If you're on a school or work network, PyPI might be blocked."
-        echo "Try from a phone hotspot, or ask IT for the proxy address."
-        echo
-        read -n 1 -s -r -p "Press any key to close..."
-        echo
-        exit 1
+# --- Fallback file picker (only if tkinter is missing) --------------
+# python.org installers include tkinter, so this is rare. Homebrew
+# users may hit it.
+if [ $# -eq 0 ] && ! "$VENV_PY" -c 'import tkinter' >/dev/null 2>&1; then
+    echo "This Python has no tkinter, so the built-in picker is unavailable."
+    echo "Choose your .docx in the dialog instead:"
+    picked="$(osascript -e 'POSIX path of (choose file with prompt "Select your Word document" of type {"docx"})' 2>/dev/null)" || picked=""
+    if [ -n "$picked" ]; then
+        set -- "$picked"
+    else
+        echo "No file selected — the tool will open its menu without a file."
     fi
+    echo
 fi
 
-# ---------------------------------------------------------------------------
-# Run the tool
-# ---------------------------------------------------------------------------
+# --- Run ------------------------------------------------------------
 echo "Starting..."
 echo
-.venv/bin/python qcaa_word_count.py
+"$VENV_PY" qcaa_word_count.py "$@"
 STATUS=$?
 
-if [ $STATUS -ne 0 ]; then
+if [ "$STATUS" -ne 0 ]; then
     echo
-    echo "The tool exited with an error. See the message above."
+    echo "The tool exited with an error (code $STATUS). See the message above."
 fi
 
 echo
-read -n 1 -s -r -p "Press any key to close..."
-echo
+pause
+exit "$STATUS"

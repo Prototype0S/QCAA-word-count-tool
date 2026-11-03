@@ -24,13 +24,29 @@ SECTION_TRIGGERS = {
 
 
 def detect_regions(document: Document) -> None:
-    # Walk the opening blocks and stop the TITLE_PAGE region at the
-    # first block that looks like body prose. A Word heading still
-    # ends the title page; so does substantial prose.
-    #
-    # Look ahead one block: if a block would be classified as
-    # TITLE_PAGE but the *next* block is prose, this block is the
-    # opening line of the body, not a title-page line.
+    """Assign a Region to each block.
+
+    The opening window is TITLE_PAGE until the first prose block. Three
+    safeguards prevent a title-page line from being promoted to BODY:
+
+      1. A block containing a stated word count ("Word count: 797")
+         is always TITLE_PAGE.
+      2. A short block (<= 12 words) with no sentence-ending punctuation
+         (author name, subtitle, date) is always TITLE_PAGE.
+      3. The one-block lookahead (used to catch short opening prose) only
+         fires when neither of the above match.
+
+    Without (1) and (2), a title page like::
+
+        Hour Maker
+        A Business Pitch
+        Edward Carroll
+        Word count: 797
+
+    had its last line promoted to BODY because the *next* block was
+    prose. That both miscounted ~2 words and hid the stated count from
+    extract_stated_count (which only scans TITLE_PAGE).
+    """
     current_region = Region.BODY
     current_level: int | None = None
     in_title_page = True
@@ -50,6 +66,23 @@ def detect_regions(document: Document) -> None:
                 current_region = Region.BODY
                 continue
             else:
+                # (1) Stated word-count line is always title page.
+                if _STATED_COUNT_LINE_RE.search(text):
+                    block.region = Region.TITLE_PAGE
+                    continue
+
+                # (2) Short block without sentence-ending punctuation
+                #     is a title-page line (author, subtitle, date).
+                words = len(text.split())
+                ends_with_sentence_punct = text.rstrip().endswith(
+                    ('.', '!', '?', ':')
+                )
+                if words <= 12 and not ends_with_sentence_punct:
+                    block.region = Region.TITLE_PAGE
+                    continue
+
+                # (3) Lookahead: block followed by prose is probably
+                #     the opening sentence of the body.
                 next_is_prose = (
                     idx + 1 < len(document.blocks)
                     and document.blocks[idx + 1].block_type != BlockType.HEADING
@@ -121,7 +154,7 @@ def _looks_like_body_prose(text: str) -> bool:
     if not t:
         return False
     if _STATED_COUNT_LINE_RE.search(t):
-        return False
+        return False   # "Word count: 1500" is a title-page line
     sentences = len(_SENTENCE_END_RE.findall(t))
     words = len(t.split())
     if sentences >= 2:
@@ -199,7 +232,12 @@ def _looks_like_reference(text: str) -> bool:
 
 
 def _detect_trailing_references(document: Document) -> None:
-    """Mark consecutive reference-like blocks at the end of the body."""
+    """Mark consecutive reference-like blocks at the end of the body.
+
+    Walks backwards and stops at the first non-reference once it has
+    started, so a 40-entry reference list is caught in full. A single
+    stray reference-like block is not marked (needs >= 2).
+    """
     body_blocks = [b for b in document.blocks if b.region == Region.BODY]
     if not body_blocks:
         return

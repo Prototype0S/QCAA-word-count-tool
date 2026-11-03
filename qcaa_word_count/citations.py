@@ -1,20 +1,19 @@
 """APA 7 in-text citation detection and exclusion.
 
 Walks BOTH paragraph blocks AND table cell blocks. Covers all standard
-APA 7 in-text forms (see patterns below).
+APA 7 in-text forms.
 
-KNOWN EDGE CASES
-
-1. Reference-list entries that appear in *body* text may match the
-   narrative pattern as "Association (2025)". In a real essay, reference
-   entries live inside the References region, which is excluded
-   wholesale, so this does not affect actual submissions.
-
-2. Possessive narrative forms ("Smith's (2020) study") are not detected.
-
-3. Non-standard paraphrase titles in the body may not match the exact
-   title in the reference list. Intentional — cross-referencing between
-   body and reference is unreliable.
+CHANGELOG (this version)
+------------------------
+  - Adds ``no-date-multiword``: (Exposure Draft, n.d.), (Some Long Title,
+    n.d.) etc. — previously counted as ordinary words because ``no-date``
+    only allowed a single-word author.
+  - Adds ``narrative-no-date``: Smith (n.d.), Smith et al. (n.d.) —
+    previously counted because ``narrative`` required a year.
+  - ``apply_citation_exclusions`` now handles spans that straddle two
+    adjacent citations, e.g. "(Smith, 2020)(Jones, 2021)" tokenises to
+    the single span "2020)(Jones" which the old fully-inside check
+    couldn't exclude.
 """
 from __future__ import annotations
 
@@ -85,6 +84,15 @@ APA_PATTERNS: list[tuple[str, re.Pattern]] = [
         r"(?:\s+et\s+al\.?)?\s*,\s*n\.?\s*d\.?"
         r"(?:\s*,\s*pp?\.?\s*\d+(?:\s*[-\u2013]\s*\d+)?)?\s*\)"
     )),
+    # Multi-word author + n.d. — "(Exposure Draft, n.d.)",
+    # "(Working Title of a Report, n.d.)". The single-word "no-date"
+    # pattern above doesn't match these.
+    ("no-date-multiword", re.compile(
+        r"\(\s*[A-Z][A-Za-z'’\-]+"
+        r"(?:\s+[A-Za-z][A-Za-z'’\-]+){1,8}"
+        r"\s*\.?\s*,\s*n\.?\s*d\.?"
+        r"(?:\s*,\s*pp?\.?\s*\d+(?:\s*[-\u2013]\s*\d+)?)?\s*\)"
+    )),
     ("simple", re.compile(
         r"\(\s*[A-Z][A-Za-z'’\-]+\s*,\s*(?:19|20)\d{2}[a-z]?"
         r"(?:\s*,\s*pp?\.?\s*\d+(?:\s*[-\u2013]\s*\d+)?)?\s*\)"
@@ -115,6 +123,15 @@ APA_PATTERNS: list[tuple[str, re.Pattern]] = [
         r"\b[A-Z][A-Za-z'’\-]+"
         r"(?:\s+(?:and|&)\s+[A-Z][A-Za-z'’\-]+|\s+et\s+al\.?)?"
         r"\s+\((?:19|20)\d{2}[a-z]?"
+        r"(?:\s*,\s*pp?\.?\s*\d+(?:\s*[-\u2013]\s*\d+)?)?\)"
+    )),
+    # Narrative form with n.d. — "Smith (n.d.)", "Smith et al. (n.d.)".
+    # The existing "narrative" pattern only matches a year, and
+    # "narrative-multiword" requires >= 2 author words.
+    ("narrative-no-date", re.compile(
+        r"\b[A-Z][A-Za-z'’\-]+"
+        r"(?:\s+(?:and|&)\s+[A-Z][A-Za-z'’\-]+|\s+et\s+al\.?)?"
+        r"\s+\(n\.?\s*d\.?"
         r"(?:\s*,\s*pp?\.?\s*\d+(?:\s*[-\u2013]\s*\d+)?)?\)"
     )),
 ]
@@ -215,19 +232,44 @@ def collect_citations(document: Document) -> list[Citation]:
 _TRAILING_PUNCT = '.,;:!?)]}\'"\u2019\u201d'
 
 
+def _all_alnum_in_citations(
+    block_text: str, s_start: int, s_end: int,
+    claimed: list[tuple[int, int, str]],
+) -> tuple[bool, str]:
+    """Return (True, source) if every alnum char in [s_start, s_end)
+    is inside *some* citation range. Returns (False, '') otherwise.
+
+    Handles adjacent citations glued into one token:
+    "(Smith, 2020)(Jones, 2021)" tokenises to a single span
+    "2020)(Jones" that straddles both citation boundaries. The old
+    fully-inside check couldn't exclude it.
+    """
+    source = ""
+    for i in range(s_start, s_end):
+        if not block_text[i].isalnum():
+            continue
+        for cs, ce, src in claimed:
+            if cs <= i < ce:
+                if not source:
+                    source = src
+                break
+        else:
+            return False, ""
+    return True, source
+
+
 def apply_citation_exclusions(document: Document) -> None:
     """Mark every span inside a detected citation as EXCLUDE.
 
-    Walks paragraphs AND table cells.
+    Handles:
+      - Spans fully inside one citation.
+      - Spans that straddle two adjacent citations (every alnum char
+        is in *some* citation), e.g. "2020)(Exposure".
+      - Explicit user toggles (I-USER-OVERRIDE / MANUAL) are preserved.
 
-    [FIX] Skip only spans the *user* explicitly toggled (rule_id
-    "I-USER-OVERRIDE" from the HTML preview, or "MANUAL" from the
-    interactive resolver). Tool-applied "manual" decisions — e.g.
-    apply_table_answer sets source="manual" with rule_id "I-WORD" —
-    must NOT be skipped, otherwise citations inside counted tables
-    never get excluded (the citation is re-classified back to I-WORD
-    by the table pass, and then the citation pass skips it because
-    source=="manual").
+    Re-runnable: calling it again after resolve_all or
+    _apply_user_overrides reclassifies table cells is safe and
+    restores any citations those passes wiped.
     """
     items = [(c.text, c.source) for c in document.citations if c.text]
     if not items:
@@ -241,10 +283,8 @@ def apply_citation_exclusions(document: Document) -> None:
                 claimed_ranges.append((m.start(), m.end(), csource))
         if not claimed_ranges:
             continue
+
         for span in block.spans:
-            # Preserve genuine user decisions (interactive prompts and
-            # HTML preview toggles). Everything else can be re-marked
-            # as a citation.
             if span.decision_record.rule_id in ("I-USER-OVERRIDE", "MANUAL"):
                 continue
 
@@ -258,20 +298,35 @@ def apply_citation_exclusions(document: Document) -> None:
             if trimmed_end <= s_start:
                 continue
 
+            # --- Pass 1: fully inside a single citation --------------
+            matched_source: str | None = None
             for c_start, c_end, c_source in claimed_ranges:
                 if s_start >= c_start and trimmed_end <= c_end:
-                    span.span_type = SpanType.CITATION
-                    span.decision_record = DecisionRecord(
-                        decision=Decision.EXCLUDE,
-                        rule_id="I-CITATION",
-                        confidence=0.9,
-                        reason="In-text citation (excluded by QCAA rules)",
-                        source="auto",
-                    )
-                    span.tags.discard("citation:auto")
-                    span.tags.discard("citation:manual")
-                    span.tags.add(f"citation:{c_source}")
+                    matched_source = c_source
                     break
+
+            # --- Pass 2: every alnum char inside *some* citation -----
+            if matched_source is None:
+                all_in, source = _all_alnum_in_citations(
+                    block_text, s_start, trimmed_end, claimed_ranges,
+                )
+                if all_in:
+                    matched_source = source or "auto"
+
+            if matched_source is None:
+                continue
+
+            span.span_type = SpanType.CITATION
+            span.decision_record = DecisionRecord(
+                decision=Decision.EXCLUDE,
+                rule_id="I-CITATION",
+                confidence=0.9,
+                reason="In-text citation (excluded by QCAA rules)",
+                source="auto",
+            )
+            span.tags.discard("citation:auto")
+            span.tags.discard("citation:manual")
+            span.tags.add(f"citation:{matched_source}")
 
 
 def find_missed_candidates(document: Document) -> list[str]:
