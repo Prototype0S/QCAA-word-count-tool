@@ -7,11 +7,10 @@ chcp 65001 >nul 2>nul
 set "PYTHONUTF8=1"
 set "PYTHONIOENCODING=utf-8"
 
-REM Push into the launcher's folder. pushd/popd survives paths with & and ().
+REM pushd/popd survive paths with & and ( that cd /d would choke on.
 pushd "%~dp0" >nul 2>nul
 if errorlevel 1 (
     echo ERROR: Could not enter the launcher folder.
-    echo        Make sure the folder is not read-only.
     goto :close
 )
 
@@ -21,20 +20,22 @@ echo   QCAA WORD COUNT TOOL
 echo ============================================================
 echo.
 
-REM --- Sanity check: are the tool files here? ----------------------
 if not exist "qcaa_word_count.py" (
     echo ERROR: qcaa_word_count.py is missing.
     echo        Keep this launcher in the same folder as the tool.
     goto :close
 )
-if not exist "qcaa_word_count\" (
+if not exist "qcaa_word_count\NUL" (
     echo ERROR: The qcaa_word_count\ folder is missing.
     echo        Keep the whole folder together.
     goto :close
 )
 
-REM --- Warn about Downloads / Temp ---------------------------------
-echo "!CD!" | findstr /i /c:"\\Downloads" /c:"\\Temp" >nul
+REM --- Warn about Downloads / Temp --------------------------------
+REM NOTE: findstr /c: matches literally — a single backslash. The
+REM previous "\\Downloads" searched for TWO backslashes and never
+REM fired, so the warning was dead code.
+echo "!CD!" | findstr /i /c:"\Downloads" /c:"\Temp" >nul
 if not errorlevel 1 (
     echo NOTE: This folder is in Downloads or a temporary location.
     echo       Move it to Documents so your virtual environment is kept.
@@ -42,14 +43,19 @@ if not errorlevel 1 (
 )
 
 REM --- Find Python 3.10+ ------------------------------------------
-REM Delayed expansion (!VAR!) is required inside (...) blocks.
 set "PY_CMD="
 call :try_python "py -3"
 if not defined PY_CMD call :try_python "python"
 if not defined PY_CMD call :try_python "python3"
 if not defined PY_CMD goto :no_python
 
+REM Verify PY_CMD actually runs (catches the Windows Store stub
+REM that exits 0 without doing anything).
+%PY_CMD% --version >nul 2>nul
+if errorlevel 1 goto :no_python
+
 for /f "tokens=2" %%v in ('%PY_CMD% --version 2^>^&1') do set "PYVER=%%v"
+if not defined PYVER goto :no_python
 echo Found Python !PYVER! (!PY_CMD!)
 
 REM --- Create / repair the virtual environment --------------------
@@ -71,7 +77,7 @@ if "!VENV_OK!"=="0" (
 )
 
 REM --- Install dependencies ---------------------------------------
-REM docx.opc exists only in python-docx, not the abandoned docx package.
+REM docx.opc exists only in python-docx, not the abandoned docx.
 "!VENV_PY!" -c "import docx, docx.opc" >nul 2>nul
 if errorlevel 1 (
     echo Installing dependencies ^(python-docx^)...

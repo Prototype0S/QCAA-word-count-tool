@@ -31,10 +31,9 @@ fail() {
     exit 1
 }
 
-# --- macOS 15+ Gatekeeper check -------------------------------------
-# On Sequoia and later, the old "right-click → Open" bypass is gone.
-# If this file has the quarantine attribute, tell the user the exact
-# steps that work now.
+# --- macOS Gatekeeper quarantine check ------------------------------
+# Sequoia (15) and later removed the right-click → Open bypass.
+# The user must go through System Settings → Privacy & Security.
 if xattr -l "$0" 2>/dev/null | grep -q "com.apple.quarantine"; then
     echo
     echo "============================================================"
@@ -63,7 +62,7 @@ fi
 
 # --- Executable bit check -------------------------------------------
 # If the file arrived via a Windows zip, it won't be executable and
-# Finder will open it in TextEdit instead of running it.
+# Finder opens it in TextEdit instead of running it.
 if [ ! -x "$0" ]; then
     echo
     echo "============================================================"
@@ -150,7 +149,6 @@ if ! venv_ok; then
 fi
 
 # --- Install dependencies -------------------------------------------
-# docx.opc exists only in the real python-docx package.
 if ! "$VENV_PY" -c 'import docx, docx.opc' >/dev/null 2>&1; then
     echo "Installing dependencies (python-docx)..."
     "$VENV_PY" -m pip install --quiet --upgrade pip >/dev/null 2>&1 || true
@@ -161,13 +159,14 @@ if ! "$VENV_PY" -c 'import docx, docx.opc' >/dev/null 2>&1; then
     fi
 fi
 
-# --- Fallback file picker (only if tkinter is missing) --------------
-# python.org installers include tkinter, so this is rare. Homebrew
-# users may hit it.
+# --- Fallback file picker if tkinter is missing ---------------------
+# python.org installers include tkinter; Homebrew usually does not.
+# NOTE: the "of type" restriction was removed because some macOS
+# versions silently reject it and show no picker at all.
 if [ $# -eq 0 ] && ! "$VENV_PY" -c 'import tkinter' >/dev/null 2>&1; then
     echo "This Python has no tkinter, so the built-in picker is unavailable."
     echo "Choose your .docx in the dialog instead:"
-    picked="$(osascript -e 'POSIX path of (choose file with prompt "Select your Word document" of type {"docx"})' 2>/dev/null)" || picked=""
+    picked="$(osascript -e 'POSIX path of (choose file with prompt "Select your Word document")' 2>/dev/null)" || picked=""
     if [ -n "$picked" ]; then
         set -- "$picked"
     else
