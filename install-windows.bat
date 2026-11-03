@@ -2,12 +2,10 @@
 setlocal EnableExtensions EnableDelayedExpansion
 title QCAA Word Count Tool
 
-REM UTF-8 for the tool's box-drawing and colour output.
 chcp 65001 >nul 2>nul
 set "PYTHONUTF8=1"
 set "PYTHONIOENCODING=utf-8"
 
-REM pushd/popd survive paths with & and ( that cd /d would choke on.
 pushd "%~dp0" >nul 2>nul
 if errorlevel 1 (
     echo ERROR: Could not enter the launcher folder.
@@ -31,10 +29,6 @@ if not exist "qcaa_word_count\NUL" (
     goto :close
 )
 
-REM --- Warn about Downloads / Temp --------------------------------
-REM NOTE: findstr /c: matches literally — a single backslash. The
-REM previous "\\Downloads" searched for TWO backslashes and never
-REM fired, so the warning was dead code.
 echo "!CD!" | findstr /i /c:"\Downloads" /c:"\Temp" >nul
 if not errorlevel 1 (
     echo NOTE: This folder is in Downloads or a temporary location.
@@ -49,8 +43,6 @@ if not defined PY_CMD call :try_python "python"
 if not defined PY_CMD call :try_python "python3"
 if not defined PY_CMD goto :no_python
 
-REM Verify PY_CMD actually runs (catches the Windows Store stub
-REM that exits 0 without doing anything).
 %PY_CMD% --version >nul 2>nul
 if errorlevel 1 goto :no_python
 
@@ -77,13 +69,30 @@ if "!VENV_OK!"=="0" (
 )
 
 REM --- Install dependencies ---------------------------------------
-REM docx.opc exists only in python-docx, not the abandoned docx.
 "!VENV_PY!" -c "import docx, docx.opc" >nul 2>nul
 if errorlevel 1 (
     echo Installing dependencies ^(python-docx^)...
     "!VENV_PY!" -m pip install --quiet --upgrade pip >nul 2>nul
     "!VENV_PY!" -m pip install --quiet python-docx
     if errorlevel 1 goto :pip_failed
+)
+
+REM --- Smoke test -------------------------------------------------
+REM Quiet on success, loud on failure. Catches "installer worked
+REM but the tool won't run" before the user hits a traceback.
+if exist "selftest.py" (
+    "!VENV_PY!" selftest.py >nul 2>nul
+    if errorlevel 1 (
+        echo.
+        echo WARNING: The tool's own sanity check failed.
+        echo          The installer worked but the tool may not run.
+        echo          Details:
+        echo.
+        "!VENV_PY!" selftest.py
+        echo.
+        set "TOOL_EXIT=1"
+        goto :close
+    )
 )
 
 REM --- Run --------------------------------------------------------
@@ -97,10 +106,6 @@ if not "!TOOL_EXIT!"=="0" (
 )
 
 goto :close
-
-REM ================================================================
-REM  Subroutines and error handlers
-REM ================================================================
 
 :try_python
 %~1 -c "import sys; raise SystemExit(0 if sys.version_info >= (3,10) else 1)" >nul 2>nul
@@ -130,8 +135,6 @@ echo.
 echo   Reinstall Python 3.15 from:
 echo       https://www.python.org/downloads/
 echo   During setup, tick "Add Python to PATH".
-echo.
-echo   If it still fails, delete the .venv folder and try again.
 echo.
 set "TOOL_EXIT=1"
 goto :close

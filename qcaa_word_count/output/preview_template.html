@@ -39,7 +39,7 @@ h1 { font-size:1.7rem; margin:0 0 .25rem 0; }
 
 .toolbar {
   display:flex; flex-wrap:wrap; gap:.5rem;
-  margin-bottom:1.5rem;
+  margin-bottom:1.5rem; align-items:center;
 }
 .toolbar button {
   background:var(--card); border:1px solid var(--border);
@@ -47,8 +47,13 @@ h1 { font-size:1.7rem; margin:0 0 .25rem 0; }
   padding:.4rem .85rem; border-radius:6px; cursor:pointer;
   transition: background .15s;
 }
-.toolbar button:hover { background:var(--cyan-bg); border-color:var(--cyan); color:var(--cyan); }
+.toolbar button:hover:not(:disabled) { background:var(--cyan-bg); border-color:var(--cyan); color:var(--cyan); }
+.toolbar button:disabled { opacity:.4; cursor:default; }
 .toolbar button.copied { background:var(--green-bg); border-color:var(--green); color:var(--green); }
+.toolbar button.active {
+  background:var(--yellow-bg); border-color:var(--yellow);
+  color:var(--yellow); font-weight:600;
+}
 
 .legend {
   display:flex; flex-wrap:wrap; gap:.5rem; margin-bottom:1.5rem;
@@ -122,6 +127,23 @@ h1 { font-size:1.7rem; margin:0 0 .25rem 0; }
 
 .count:hover, .exclude:hover, .citation:hover, .flag:hover, .unit:hover {
   outline:2px solid currentColor; outline-offset:1px; border-radius:2px;
+}
+
+span.selected {
+  outline: 2px solid #f0b429;
+  outline-offset: 1px;
+  border-radius: 2px;
+  background: rgba(240,180,41,.18) !important;
+}
+
+@keyframes qcaa-flash {
+  0%   { background: rgba(240,180,41,0); }
+  20%  { background: rgba(240,180,41,.85); }
+  100% { background: rgba(240,180,41,0); }
+}
+span.flash-highlight {
+  animation: qcaa-flash 1.8s ease-out;
+  border-radius: 2px;
 }
 
 table { border-collapse:collapse; margin:.75rem 0 1.25rem 0;
@@ -221,7 +243,6 @@ summary { cursor:pointer; color:var(--cyan); font-weight:500; }
 }
 .span-tooltip .st-close:hover { color:var(--red); }
 
-/* Sticky count bar */
 .sticky-count {
   display: none;
   position: fixed; top: 0; left: 0; right: 0;
@@ -236,7 +257,6 @@ summary { cursor:pointer; color:var(--cyan); font-weight:500; }
   font-weight: 500; font-size: .85rem; margin-left: .5rem;
 }
 
-/* Confidence meter — colour drives both the fill and the glow */
 .confidence-meter {
   display: inline-block; width: 90px; height: 8px;
   background: var(--grey-bg); border-radius: 4px;
@@ -247,8 +267,6 @@ summary { cursor:pointer; color:var(--cyan); font-weight:500; }
   display: block; height: 100%; border-radius: 4px;
   transition: background .2s, box-shadow .2s;
 }
-
-/* Three states, driven by classes set from JS */
 .confidence-meter.conf-high .confidence-fill {
   background: var(--green);
   box-shadow: 0 0 6px 1px rgba(26,127,55,.55);
@@ -261,17 +279,15 @@ summary { cursor:pointer; color:var(--cyan); font-weight:500; }
   background: var(--red);
   box-shadow: 0 0 6px 1px rgba(207,34,46,.55);
 }
-
-/* The numeric percentage gets the same accent colour */
 .confidence-pct { font-weight: 700; }
 .confidence-pct.conf-high { color: var(--green); }
 .confidence-pct.conf-mid  { color: var(--yellow); }
 .confidence-pct.conf-low  { color: var(--red); }
 
-/* Print stylesheet — strips interactive chrome, keeps the audit */
 @media print {
   .toolbar, .legend, #override-status, .sticky-count,
-  .span-tooltip, #tooltip { display: none !important; }
+  .span-tooltip, #tooltip, #selection-bar, #low-conf-panel,
+  #browse-all-panel { display: none !important; }
   body { background: #fff; color: #000; max-width: 100%; margin: 0; padding: 0 1rem; }
   .panel { box-shadow: none; border: 1px solid #d0d7de; break-inside: avoid; }
   .final-count { font-size: 2rem; }
@@ -283,25 +299,19 @@ summary { cursor:pointer; color:var(--cyan); font-weight:500; }
   .heading.h1 { page-break-before: always; }
   .heading.h1:first-child { page-break-before: auto; }
 }
-/* Hover preview (non-intrusive — different from click tooltip) */
 .span-toggle:hover,
 .table-toggle:hover {
   outline: 2px solid currentColor;
   outline-offset: 1px;
   border-radius: 2px;
 }
-
-/* Table toggle */
 .table-toggle {
-  cursor: pointer;
-  font-weight: 600;
-  padding: 0 .25rem;
-  border-radius: 3px;
+  cursor: pointer; font-weight: 600;
+  padding: 0 .25rem; border-radius: 3px;
   transition: background .15s;
 }
 .table-toggle:hover { background: rgba(128,128,128,.15); }
 
-/* Hover preview tooltip (small, cursor-following, auto-dismiss) */
 .hover-preview {
   position: absolute; z-index: 999;
   background: var(--card); border: 1px solid var(--border);
@@ -313,9 +323,7 @@ summary { cursor:pointer; color:var(--cyan); font-weight:500; }
   color: var(--text);
 }
 .hover-preview.visible { display: block; }
-.hover-preview .hp-row {
-  display: flex; gap: .5rem; margin-top: .15rem;
-}
+.hover-preview .hp-row { display: flex; gap: .5rem; margin-top: .15rem; }
 .hover-preview .hp-key { color: var(--grey); min-width: 60px; }
 .hover-preview .hp-text { font-weight: 600; margin-bottom: .2rem; }
 .hover-preview .hp-conf {
@@ -325,6 +333,174 @@ summary { cursor:pointer; color:var(--cyan); font-weight:500; }
 .hp-conf.high { background: var(--green-bg); color: var(--green); }
 .hp-conf.mid  { background: var(--yellow-bg); color: var(--yellow); }
 .hp-conf.low  { background: var(--red-bg); color: var(--red); }
+
+/* ============================================================
+   Selection action bar
+   ============================================================ */
+.selection-bar {
+  position: fixed; bottom: 0; left: 0; right: 0;
+  background: var(--card);
+  border-top: 2px solid var(--yellow);
+  padding: .75rem 1.5rem;
+  display: none;
+  align-items: center; gap: .75rem;
+  z-index: 200;
+  box-shadow: 0 -4px 12px rgba(0,0,0,.15);
+  flex-wrap: wrap;
+}
+.selection-bar.visible { display: flex; }
+.selection-bar .sel-count {
+  font-weight: 700; color: var(--yellow); font-size: 1rem;
+  margin-right: .5rem;
+}
+.selection-bar button {
+  font-family: inherit; font-size: .9rem;
+  padding: .45rem 1rem; border-radius: 6px;
+  cursor: pointer; border: 1px solid var(--border);
+  background: var(--bg); color: var(--text);
+}
+.selection-bar button.bulk-count:hover {
+  background: var(--green-bg); border-color: var(--green); color: var(--green);
+}
+.selection-bar button.bulk-exclude:hover {
+  background: var(--red-bg); border-color: var(--red); color: var(--red);
+}
+.selection-bar button.clear-btn:hover { background: var(--grey-bg); }
+.selection-bar button.done-btn {
+  margin-left: auto;
+  background: var(--yellow-bg); border-color: var(--yellow);
+  color: var(--yellow); font-weight: 600;
+}
+
+/* ============================================================
+   List panels (low-conf + browse-all share these styles)
+   ============================================================ */
+.list-toolbar {
+  display: flex; flex-wrap: wrap; gap: .5rem;
+  align-items: center; margin-bottom: .75rem;
+  padding-bottom: .75rem;
+  border-bottom: 1px solid var(--border);
+  font-size: .85rem;
+}
+.list-toolbar label {
+  display: inline-flex; align-items: center; gap: .35rem;
+  color: var(--grey);
+}
+.list-toolbar select {
+  font-family: inherit; font-size: .85rem;
+  padding: .25rem .5rem; border-radius: 4px;
+  border: 1px solid var(--border);
+  background: var(--bg); color: var(--text);
+}
+.list-toolbar .toolbar-sep { flex: 1; }
+.list-toolbar button {
+  font-family: inherit; font-size: .8rem;
+  padding: .3rem .7rem; border-radius: 5px;
+  cursor: pointer; border: 1px solid var(--border);
+  background: var(--bg); color: var(--text);
+}
+.list-toolbar button:hover {
+  background: var(--cyan-bg); border-color: var(--cyan); color: var(--cyan);
+}
+
+.list-container {
+  max-height: 420px; overflow-y: auto;
+  border: 1px solid var(--border); border-radius: 6px;
+  background: var(--bg);
+}
+.list-row {
+  display: grid;
+  grid-template-columns: 22px 55px 1fr auto auto auto;
+  gap: .5rem; align-items: center;
+  padding: .45rem .6rem;
+  border-bottom: 1px solid var(--border);
+  font-size: .88rem;
+}
+.list-row:last-child { border-bottom: none; }
+.list-row:hover { background: var(--card); }
+.list-row.selected-row { background: var(--yellow-bg); }
+.list-row input[type="checkbox"] { cursor: pointer; }
+
+.low-conf-conf {
+  font-size: .75rem; font-weight: 700;
+  padding: .1rem .4rem; border-radius: 999px;
+  text-align: center; font-variant-numeric: tabular-nums;
+}
+.low-conf-conf.low  { background: var(--red-bg); color: var(--red); }
+.low-conf-conf.mid  { background: var(--yellow-bg); color: var(--yellow); }
+.low-conf-conf.high { background: var(--green-bg); color: var(--green); }
+
+.low-conf-word {
+  cursor: pointer;
+  font-family: "SF Mono", Consolas, monospace;
+  font-size: .84rem;
+  white-space: nowrap; overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 340px;
+}
+.low-conf-word:hover { text-decoration: underline; }
+
+.low-conf-rule {
+  font-family: "SF Mono", Consolas, monospace;
+  font-size: .72rem;
+  color: var(--grey);
+  white-space: nowrap;
+}
+.low-conf-decision {
+  font-size: .72rem; padding: .1rem .4rem;
+  border-radius: 3px; font-weight: 600;
+  white-space: nowrap;
+}
+.low-conf-decision.count   { background: var(--green-bg);   color: var(--green); }
+.low-conf-decision.exclude { background: var(--red-bg);     color: var(--red); }
+.low-conf-decision.citation{ background: var(--magenta-bg); color: var(--magenta); }
+.low-conf-decision.flag    { background: var(--yellow-bg);  color: var(--yellow); }
+
+.low-conf-jump {
+  font-family: inherit; font-size: .75rem;
+  padding: .2rem .55rem; border-radius: 4px;
+  border: 1px solid var(--border); background: var(--bg);
+  color: var(--cyan); cursor: pointer;
+}
+.low-conf-jump:hover {
+  background: var(--cyan-bg); border-color: var(--cyan);
+}
+
+.list-empty {
+  text-align: center; padding: 1.5rem;
+  color: var(--grey); font-style: italic;
+}
+.list-count {
+  color: var(--grey); font-size: .8rem;
+  font-variant-numeric: tabular-nums;
+}
+
+/* Browse-all details panel */
+.browse-all-panel > summary {
+  cursor: pointer;
+  font-size: 1.15rem;
+  font-weight: 600;
+  padding: .25rem 0;
+  display: flex;
+  align-items: baseline;
+  gap: .75rem;
+  list-style-position: inside;
+}
+.browse-all-panel > summary::marker { color: var(--cyan); }
+.browse-all-panel[open] > summary {
+  margin-bottom: .75rem;
+  padding-bottom: .5rem;
+  border-bottom: 1px solid var(--border);
+}
+.browse-all-panel > summary:hover { color: var(--cyan); }
+
+.kbd {
+  display: inline-block;
+  font-family: "SF Mono", Consolas, monospace;
+  font-size: .72rem; padding: .05rem .35rem;
+  border: 1px solid var(--border); border-radius: 3px;
+  background: var(--bg); color: var(--text);
+}
 </style>
 </head>
 <body>
@@ -340,6 +516,9 @@ summary { cursor:pointer; color:var(--cyan); font-weight:500; }
 <div class="toolbar">
   <button id="theme-btn" type="button">🌙 Dark mode</button>
   <button id="copy-btn" type="button">📋 Copy summary</button>
+  <button id="select-mode-btn" type="button" title="Toggle multi-select mode (S)">✓ Select mode</button>
+  <button id="undo-btn" type="button" title="Undo (Ctrl+Z)" disabled>↶ Undo</button>
+  <button id="redo-btn" type="button" title="Redo (Ctrl+Y)" disabled>↷ Redo</button>
   <button id="reset-btn" type="button" title="Undo all your toggles">↺ Reset toggles</button>
   <button id="save-overrides-btn" type="button" title="Download a JSON file of your changes">💾 Save overrides</button>
   <button type="button" onclick="window.print()">🖨️ Print / Save PDF</button>
@@ -347,13 +526,16 @@ summary { cursor:pointer; color:var(--cyan); font-weight:500; }
 </div>
 
 <div class="panel" style="padding:.75rem 1rem;">
-  <strong>Interactive mode</strong> — click any coloured word to see its rule.
-  <strong>Ctrl+click</strong> (⌘+click on Mac) to toggle one instance.
-  <strong>Shift+Ctrl+click</strong> to toggle <em>every</em> instance of that word.
-  <strong>Alt+click</strong> to undo one toggle.
+  <strong>Interactive mode</strong> —
+  <strong>Click</strong> any coloured word to see its rule.
+  <strong><span class="kbd">Ctrl</span>+click</strong> (⌘+click on Mac) to toggle one instance.
+  <strong><span class="kbd">Alt</span>+click</strong> to undo one toggle.
+  <strong><span class="kbd">Ctrl</span>+<span class="kbd">Z</span></strong> /
+  <strong><span class="kbd">Ctrl</span>+<span class="kbd">Y</span></strong> to step backward or forward.
   <br>
-  Click <em>💾 Save overrides</em> to download a JSON file, then run
-  <code>python qcaa_word_count.py "yourfile.docx" --apply-overrides qcaa_overrides.json</code>.
+  <strong>Select mode</strong> (<span class="kbd">S</span>) lets you click multiple words
+  then Count or Exclude them all at once. <strong><span class="kbd">Shift</span>+click</strong>
+  selects everything between the last two clicks.
 </div>
 
 <div class="legend">
@@ -372,6 +554,82 @@ summary { cursor:pointer; color:var(--cyan); font-weight:500; }
   <div class="final-count">{{total}}<small>words · about {{reading_minutes}} min read</small></div>
   <dl class="stats-grid">{{stats_rows}}</dl>
 </div>
+
+<!-- ============================================================
+     LOW-CONFIDENCE PANEL
+     ============================================================ -->
+<div class="panel" id="low-conf-panel">
+  <h2>
+    Low-confidence decisions
+    <span class="badge badge-warn" id="low-conf-badge">review these</span>
+  </h2>
+  <p style="color:var(--grey); font-size:.88rem; margin:0 0 .75rem 0;">
+    Every span the tool wasn't sure about (confidence below 70%).
+    Each row is one instance. Click <strong>Jump</strong> to scroll to it
+    in the document, or tick the checkbox to bulk-treat it below.
+    Rows disappear once you've decided on them.
+  </p>
+  <div class="list-toolbar">
+    <label>Sort:
+      <select id="low-conf-sort">
+        <option value="asc">Lowest confidence first</option>
+        <option value="desc">Highest confidence first</option>
+        <option value="doc">Document order</option>
+      </select>
+    </label>
+    <label>Filter:
+      <select id="low-conf-filter">
+        <option value="all">All</option>
+        <option value="count">Currently counted</option>
+        <option value="exclude">Currently excluded</option>
+      </select>
+    </label>
+    <span class="list-count" id="low-conf-count"></span>
+    <span class="toolbar-sep"></span>
+    <button id="low-conf-select-all">Select all visible</button>
+    <button id="low-conf-clear-selection">Clear selection</button>
+  </div>
+  <div class="list-container" id="low-conf-list"></div>
+  <p class="list-empty" id="low-conf-empty" style="display:none;">
+    All spans have confidence 70% or higher — nothing to review here.
+    Open <strong>Browse all words</strong> below to see every word.
+  </p>
+</div>
+
+<!-- ============================================================
+     BROWSE-ALL PANEL (collapsible)
+     ============================================================ -->
+<details class="panel browse-all-panel" id="browse-all-panel">
+  <summary>
+    Browse all words
+    <span class="badge badge-info" id="browse-all-count"></span>
+  </summary>
+  <p style="color:var(--grey); font-size:.88rem; margin:0 0 .75rem 0;">
+    Every word in the document, including the high-confidence ones.
+    Same controls as above.
+  </p>
+  <div class="list-toolbar">
+    <label>Sort:
+      <select id="browse-all-sort">
+        <option value="doc">Document order</option>
+        <option value="asc">Lowest confidence first</option>
+        <option value="desc">Highest confidence first</option>
+      </select>
+    </label>
+    <label>Filter:
+      <select id="browse-all-filter">
+        <option value="all">All</option>
+        <option value="count">Currently counted</option>
+        <option value="exclude">Currently excluded</option>
+      </select>
+    </label>
+    <span class="list-count" id="browse-all-count-label"></span>
+    <span class="toolbar-sep"></span>
+    <button id="browse-all-select-all">Select all visible</button>
+    <button id="browse-all-clear-selection">Clear selection</button>
+  </div>
+  <div class="list-container" id="browse-all-list"></div>
+</details>
 
 <div class="panel">
   <h2>Statistics <span class="badge badge-info">writing breakdown</span></h2>
@@ -403,17 +661,26 @@ summary { cursor:pointer; color:var(--cyan); font-weight:500; }
   </dl>
 </div>
 
+<div class="selection-bar" id="selection-bar">
+  <span class="sel-count" id="sel-count">0 selected</span>
+  <button type="button" class="bulk-count" id="bulk-count-btn">✓ Count selected</button>
+  <button type="button" class="bulk-exclude" id="bulk-exclude-btn">✗ Exclude selected</button>
+  <button type="button" class="clear-btn" id="bulk-clear-btn">Clear</button>
+  <button type="button" class="done-btn" id="bulk-done-btn">Done</button>
+</div>
+
 <script>
-/* SUMMARY_JSON and ORIGINAL_TOTAL are substituted by Python before saving. */
 const SUMMARY_JSON = {{summary_json}};
 const ORIGINAL_TOTAL = {{original_total}};
 const TABLE_ANSWERS = {{table_answers}};
 
 (function () {
-  // ---------- Theme ----------
+  // ==========================================================
+  //  THEME
+  // ==========================================================
   const themeBtn = document.getElementById('theme-btn');
-  const saved = localStorage.getItem('qcaa-theme');
-  if (saved === 'dark') {
+  const savedTheme = localStorage.getItem('qcaa-theme');
+  if (savedTheme === 'dark') {
     document.body.classList.add('dark');
     themeBtn.textContent = '☀️ Light mode';
   }
@@ -423,7 +690,9 @@ const TABLE_ANSWERS = {{table_answers}};
     localStorage.setItem('qcaa-theme', dark ? 'dark' : 'light');
   });
 
-  // ---------- Copy summary ----------
+  // ==========================================================
+  //  COPY SUMMARY
+  // ==========================================================
   const copyBtn = document.getElementById('copy-btn');
   copyBtn.addEventListener('click', async () => {
     try {
@@ -439,7 +708,9 @@ const TABLE_ANSWERS = {{table_answers}};
     }
   });
 
-  // ---------- Cached DOM lookups ----------
+  // ==========================================================
+  //  CACHED DOM LOOKUPS
+  // ==========================================================
   const _spanCache = new Map();
   let _spanCacheBuilt = false;
   function getAllSpans() {
@@ -455,9 +726,23 @@ const TABLE_ANSWERS = {{table_answers}};
   const _totalEl = document.querySelector('.final-count');
   const _statusEl = document.getElementById('override-status');
 
-  // ---------- Hover preview ----------
-  // Small, cursor-following tooltip that appears after 300ms of hover.
-  // Clicking still opens the full detail tooltip — the two are separate.
+  // Original class for a span, derived from its server-side decision.
+  // Used to restore after undo of an override.
+  function originalClass(el) {
+    const dec = el.getAttribute('data-decision');
+    const rule = el.getAttribute('data-rule') || '';
+    if (dec === 'count') {
+      return (rule === 'I-UNIT' || rule === 'I-MEASUREMENT') ? 'unit' : 'count';
+    }
+    if (dec === 'exclude') {
+      return rule === 'I-CITATION' ? 'citation' : 'exclude';
+    }
+    return 'flag';
+  }
+
+  // ==========================================================
+  //  HOVER PREVIEW
+  // ==========================================================
   const hoverPreview = document.createElement('div');
   hoverPreview.className = 'hover-preview';
   document.body.appendChild(hoverPreview);
@@ -479,9 +764,11 @@ const TABLE_ANSWERS = {{table_answers}};
     let confHtml = '';
     if (conf) {
       const c = parseFloat(conf);
-      const cls = confidenceClass(c);
-      confHtml = `<div class="hp-row"><span class="hp-key">Confidence</span>` +
-        `<span class="hp-conf ${cls}">${(c*100).toFixed(0)}%</span></div>`;
+      if (!isNaN(c)) {
+        const cls = confidenceClass(c);
+        confHtml = `<div class="hp-row"><span class="hp-key">Confidence</span>` +
+          `<span class="hp-conf ${cls}">${(c*100).toFixed(0)}%</span></div>`;
+      }
     }
 
     hoverPreview.innerHTML =
@@ -502,12 +789,8 @@ const TABLE_ANSWERS = {{table_answers}};
     const rect = hoverPreview.getBoundingClientRect();
     let left = x + 14;
     let top = y + 14;
-    if (left + rect.width > window.innerWidth - 10) {
-      left = x - rect.width - 14;
-    }
-    if (top + rect.height > window.innerHeight - 10) {
-      top = y - rect.height - 14;
-    }
+    if (left + rect.width > window.innerWidth - 10) left = x - rect.width - 14;
+    if (top + rect.height > window.innerHeight - 10) top = y - rect.height - 14;
     hoverPreview.style.left = (left + window.scrollX) + 'px';
     hoverPreview.style.top = (top + window.scrollY) + 'px';
   }
@@ -529,17 +812,14 @@ const TABLE_ANSWERS = {{table_answers}};
       if (hoverPreview.classList.contains('visible')) hideHoverPreview();
       return;
     }
+    if (selectMode) return;
     if (hoverPreview.classList.contains('visible')) {
-      // Already showing — just track the cursor
       positionHover(e.pageX - window.scrollX, e.pageY - window.scrollY);
       return;
     }
-    // Start a 300ms timer to show
     clearTimeout(hoverTimer);
     const cx = e.clientX, cy = e.clientY;
-    hoverTimer = setTimeout(() => {
-      showHoverPreview(t, cx, cy);
-    }, 300);
+    hoverTimer = setTimeout(() => { showHoverPreview(t, cx, cy); }, 300);
   });
 
   document.addEventListener('mouseout', (e) => {
@@ -549,7 +829,9 @@ const TABLE_ANSWERS = {{table_answers}};
     }
   });
 
-  // ---------- Full-detail click tooltip ----------
+  // ==========================================================
+  //  CLICK TOOLTIP
+  // ==========================================================
   const tooltip = document.getElementById('tooltip');
   const tooltipText = document.getElementById('tooltip-text');
   const tooltipDecision = document.getElementById('tooltip-decision');
@@ -560,7 +842,8 @@ const TABLE_ANSWERS = {{table_answers}};
   document.addEventListener('click', (e) => {
     const t = e.target;
     if (!t.matches || !t.matches('span.span-toggle')) return;
-    if (e.ctrlKey || e.metaKey || e.altKey) return;
+    if (e.ctrlKey || e.metaKey || e.altKey || e.shiftKey) return;
+    if (selectMode) return;
     tooltipText.textContent = '"' + t.textContent + '"';
     tooltipDecision.textContent = t.getAttribute('data-decision') || '(none)';
     tooltipRule.textContent = t.getAttribute('data-rule') || '(none)';
@@ -589,7 +872,9 @@ const TABLE_ANSWERS = {{table_answers}};
     if (e.key === 'Escape') hideTooltip();
   });
 
-  // ---------- Per-instance toggle ----------
+  // ==========================================================
+  //  STATE
+  // ==========================================================
   const _spanCount = document.querySelectorAll('span.span-toggle[data-span-id]').length;
   const _fingerprint = ORIGINAL_TOTAL + '-' + _spanCount;
   const STORAGE_KEY = 'qcaa-overrides-v2-' + location.pathname + '-' + _fingerprint;
@@ -597,9 +882,15 @@ const TABLE_ANSWERS = {{table_answers}};
   try { localStorage.removeItem('qcaa-overrides-' + location.pathname); }
   catch (e) { /* ignore */ }
 
-  const overrides = new Map();
-  const tableOverrides = new Map();  // table_index -> 'count_all' | 'exclude_all'
+  const overrides = new Map();       // spanId -> 'count'|'exclude'
+  const tableOverrides = new Map();  // tableIndex -> 'count_all'|'exclude_all'
   let loadedFromPrevious = 0;
+
+  // History stacks for undo / redo.
+  //   history  = [{ changes: [{kind:'span'|'table', id, before, after}, ...] }, ...]
+  //   redoStack = same shape
+  const history = [];
+  const redoStack = [];
 
   try {
     const savedJson = localStorage.getItem(STORAGE_KEY);
@@ -608,7 +899,6 @@ const TABLE_ANSWERS = {{table_answers}};
       if (parsed.spans) {
         for (const [k, v] of Object.entries(parsed.spans)) overrides.set(k, v);
       } else {
-        // Legacy format (just {id: decision})
         for (const [k, v] of Object.entries(parsed)) overrides.set(k, v);
       }
       if (parsed.tables) {
@@ -619,48 +909,30 @@ const TABLE_ANSWERS = {{table_answers}};
       for (const id of overrides.keys()) {
         if (spanById(id)) loadedFromPrevious += 1;
       }
-      applyAllOverrides();
     }
   } catch (e) { /* ignore */ }
 
+  // ==========================================================
+  //  DOM STATE APPLIERS
+  // ==========================================================
   function tableSpans(tableIndex) {
-    const table = document.querySelector(
+    const cap = document.querySelector(
       `caption [data-table-index="${tableIndex}"]`
     );
-    if (!table) return [];
-    const tableEl = table.closest('table');
+    if (!cap) return [];
+    const tableEl = cap.closest('table');
     if (!tableEl) return [];
     return tableEl.querySelectorAll('span.span-toggle[data-span-id]');
   }
 
-  function applyAllOverrides() {
-    for (const [id, want] of overrides.entries()) {
-      const el = spanById(id);
-      if (!el) continue;
-      const wasCounted = el.getAttribute('data-original-counted') === '1';
-      if (want === 'count' && !wasCounted) {
-        el.classList.remove('exclude', 'citation');
-        el.classList.add('count');
-      } else if (want === 'exclude' && wasCounted) {
-        el.classList.remove('count', 'unit');
-        el.classList.add('exclude');
-      }
-    }
-    // Re-apply table overrides (per-table toggles) last so they win.
-    for (const [idx, choice] of tableOverrides.entries()) {
-      applyTableOverride(idx, choice);
-    }
-    updateTotal();
-  }
-
-  function applyTableOverride(tableIndex, choice) {
+  function applyTableOverrideToDom(tableIndex, choice) {
     const spans = tableSpans(tableIndex);
     for (const el of spans) {
       if (choice === 'exclude_all') {
-        el.classList.remove('count', 'unit');
+        el.classList.remove('count', 'unit', 'flag');
         el.classList.add('exclude');
       } else {
-        el.classList.remove('exclude', 'citation');
+        el.classList.remove('exclude', 'citation', 'flag');
         el.classList.add('count');
       }
     }
@@ -673,6 +945,148 @@ const TABLE_ANSWERS = {{table_answers}};
     }
   }
 
+  // Apply a span's override state to the Map AND the DOM.
+  // `state` may be 'count', 'exclude', or null (meaning: no override).
+  function applySpanState(id, state) {
+    const el = spanById(id);
+    if (!el) return;
+    el.classList.remove('count', 'exclude', 'citation', 'unit', 'flag');
+    if (state === null) {
+      overrides.delete(id);
+      el.classList.add(originalClass(el));
+    } else if (state === 'count') {
+      overrides.set(id, 'count');
+      el.classList.add('count');
+    } else if (state === 'exclude') {
+      overrides.set(id, 'exclude');
+      el.classList.add('exclude');
+    }
+  }
+
+  // Apply a table's override state. `state` = 'count_all' | 'exclude_all' | null.
+  function applyTableState(idx, state) {
+    if (state === null) {
+      tableOverrides.delete(idx);
+      const spans = tableSpans(idx);
+      for (const el of spans) {
+        const spanId = el.getAttribute('data-span-id');
+        if (overrides.has(spanId)) continue;  // span override wins
+        el.classList.remove('count', 'exclude', 'citation', 'unit', 'flag');
+        el.classList.add(originalClass(el));
+      }
+      const cap = document.querySelector(
+        `caption [data-table-index="${idx}"]`
+      );
+      if (cap) {
+        cap.classList.remove('count', 'exclude');
+        const orig = TABLE_ANSWERS[String(idx)];
+        const isCount = orig === 'count_all' || orig === 'headers_only';
+        cap.classList.add(isCount ? 'count' : 'exclude');
+      }
+    } else {
+      tableOverrides.set(idx, state);
+      applyTableOverrideToDom(idx, state);
+    }
+  }
+
+  // ==========================================================
+  //  HISTORY (undo / redo)
+  // ==========================================================
+  const undoBtn = document.getElementById('undo-btn');
+  const redoBtn = document.getElementById('redo-btn');
+
+  function updateUndoRedoButtons() {
+    undoBtn.disabled = history.length === 0;
+    redoBtn.disabled = redoStack.length === 0;
+  }
+
+  // Record a batch of changes and apply them. Each change is:
+  //   { kind: 'span', id, after: 'count'|'exclude' }
+  //   { kind: 'table', id: <tableIndex>, after: 'count_all'|'exclude_all' }
+  function recordAndApply(changes) {
+    if (!changes || changes.length === 0) return;
+    const annotated = [];
+    for (const c of changes) {
+      if (c.kind === 'span') {
+        annotated.push({
+          kind: 'span',
+          id: c.id,
+          before: overrides.has(c.id) ? overrides.get(c.id) : null,
+          after: c.after,
+        });
+      } else if (c.kind === 'table') {
+        annotated.push({
+          kind: 'table',
+          id: c.id,
+          before: tableOverrides.has(c.id) ? tableOverrides.get(c.id) : null,
+          after: c.after,
+        });
+      }
+    }
+    // Apply 'after'
+    for (const c of annotated) {
+      if (c.kind === 'span') applySpanState(c.id, c.after);
+      else applyTableState(c.id, c.after);
+    }
+    history.push({ changes: annotated });
+    redoStack.length = 0;
+    updateUndoRedoButtons();
+    loadedFromPrevious = 0;
+    persist();
+    updateTotal();
+  }
+
+  function undo() {
+    if (history.length === 0) return;
+    const action = history.pop();
+    for (let i = action.changes.length - 1; i >= 0; i--) {
+      const c = action.changes[i];
+      if (c.kind === 'span') applySpanState(c.id, c.before);
+      else applyTableState(c.id, c.before);
+    }
+    redoStack.push(action);
+    loadedFromPrevious = 0;
+    persist();
+    updateTotal();
+    updateUndoRedoButtons();
+  }
+
+  function redo() {
+    if (redoStack.length === 0) return;
+    const action = redoStack.pop();
+    for (const c of action.changes) {
+      if (c.kind === 'span') applySpanState(c.id, c.after);
+      else applyTableState(c.id, c.after);
+    }
+    history.push(action);
+    loadedFromPrevious = 0;
+    persist();
+    updateTotal();
+    updateUndoRedoButtons();
+  }
+
+  undoBtn.addEventListener('click', undo);
+  redoBtn.addEventListener('click', redo);
+
+  // ==========================================================
+  //  APPLY SAVED OVERRIDES ON INIT (not recorded as history)
+  // ==========================================================
+  function applySavedOverrides() {
+    for (const [id, want] of overrides.entries()) {
+      const el = spanById(id);
+      if (!el) continue;
+      el.classList.remove('count', 'exclude', 'citation', 'unit', 'flag');
+      el.classList.add(want === 'count' ? 'count' : 'exclude');
+    }
+    for (const [idx, choice] of tableOverrides.entries()) {
+      applyTableOverrideToDom(idx, choice);
+    }
+  }
+  applySavedOverrides();
+
+  // ==========================================================
+  //  TOTAL
+  // ==========================================================
   function computeTotal() {
     let delta = 0;
     for (const [id, decision] of overrides.entries()) {
@@ -682,29 +1096,6 @@ const TABLE_ANSWERS = {{table_answers}};
       if (decision === 'count' && !wasCounted) delta += 1;
       else if (decision === 'exclude' && wasCounted) delta -= 1;
     }
-    // Table overrides: compute the delta for each table by counting
-    // how many currently-counted spans differ from the original state.
-    for (const [idx, choice] of tableOverrides.entries()) {
-      const spans = tableSpans(idx);
-      for (const el of spans) {
-        const wasCounted = el.getAttribute('data-original-counted') === '1';
-        const isNowCounted = el.classList.contains('count') ||
-                             el.classList.contains('unit');
-        // The per-span override (if any) already applied its delta.
-        // Apply the *residual* delta from the table override.
-        const spanId = el.getAttribute('data-span-id');
-        const spanOverride = overrides.get(spanId);
-        if (spanOverride) continue;   // span override wins
-        if (wasCounted && !isNowCounted && choice === 'exclude_all') {
-          // Already excluded — but was it excluded by this override?
-          // We can't tell, so just skip; the counting below handles it.
-        }
-      }
-    }
-    // Simpler: just recount from scratch for spans that are affected by
-    // table overrides. Since ORIGINAL_TOTAL was Python's number and
-    // per-span overrides are exact deltas, we add table-override deltas
-    // based on how many spans changed class.
     for (const [idx, choice] of tableOverrides.entries()) {
       const spans = tableSpans(idx);
       let countedNow = 0;
@@ -714,13 +1105,12 @@ const TABLE_ANSWERS = {{table_answers}};
         if (el.getAttribute('data-original-counted') === '1') countedOrig += 1;
       }
       delta += countedNow - countedOrig;
-      // Subtract the contribution already counted by per-span overrides
-      // for this table (to avoid double-counting).
       for (const [id, decision] of overrides.entries()) {
         const el = spanById(id);
         if (!el) continue;
-        if (!el.closest('table')) continue;
-        const cap = el.closest('table').querySelector('caption [data-table-index]');
+        const tableEl = el.closest('table');
+        if (!tableEl) continue;
+        const cap = tableEl.querySelector('caption [data-table-index]');
         if (!cap || cap.getAttribute('data-table-index') !== String(idx)) continue;
         const wasCounted = el.getAttribute('data-original-counted') === '1';
         if (decision === 'count' && !wasCounted) delta -= 1;
@@ -761,6 +1151,9 @@ const TABLE_ANSWERS = {{table_answers}};
         }
       }
     }
+    // Update list panels
+    rebuildLowConfList();
+    markBrowseAllDirty();
   }
 
   function updateStickyBar(total) {
@@ -790,78 +1183,6 @@ const TABLE_ANSWERS = {{table_answers}};
   window.addEventListener('resize', updateStickyVisibility, { passive: true });
   updateStickyVisibility();
 
-  document.addEventListener('click', (e) => {
-    const t = e.target;
-    if (!t.matches) return;
-
-    // Table toggle: Ctrl+click on the caption label
-    if (t.matches('.table-toggle') && (e.ctrlKey || e.metaKey)) {
-      e.preventDefault();
-      const idx = t.getAttribute('data-table-index');
-      if (!idx) return;
-      const wasCounted = t.getAttribute('data-original-counted') === '1';
-      const spanNowCounted = t.classList.contains('count');
-      const targetChoice = spanNowCounted ? 'exclude_all' : 'count_all';
-      tableOverrides.set(idx, targetChoice);
-      applyTableOverride(idx, targetChoice);
-      loadedFromPrevious = 0;
-      updateTotal();
-      persist();
-      return;
-    }
-
-    // Span toggle (existing behaviour)
-    if (t.matches('span.span-toggle') && (e.ctrlKey || e.metaKey)) {
-      e.preventDefault();
-      const id = t.getAttribute('data-span-id');
-      if (!id) return;
-      const isNowCounted = t.classList.contains('count') ||
-                           t.classList.contains('unit');
-      const targetDecision = isNowCounted ? 'exclude' : 'count';
-
-      if (e.shiftKey) {
-        const text = t.getAttribute('data-text') || '';
-        const all = document.querySelectorAll(
-          'span.span-toggle[data-text="' + CSS.escape(text) + '"]'
-        );
-        for (const el of all) {
-          const eid = el.getAttribute('data-span-id');
-          if (!eid) continue;
-          overrides.set(eid, targetDecision);
-          if (targetDecision === 'exclude') {
-            el.classList.remove('count', 'unit');
-            el.classList.add('exclude');
-          } else {
-            el.classList.remove('exclude', 'citation');
-            el.classList.add('count');
-          }
-        }
-      } else {
-        overrides.set(id, targetDecision);
-        if (targetDecision === 'exclude') {
-          t.classList.remove('count', 'unit');
-          t.classList.add('exclude');
-        } else {
-          t.classList.remove('exclude', 'citation');
-          t.classList.add('count');
-        }
-      }
-      loadedFromPrevious = 0;
-      updateTotal();
-      persist();
-      return;
-    }
-    if (t.matches('span.span-toggle') && e.altKey) {
-      e.preventDefault();
-      const id = t.getAttribute('data-span-id');
-      if (!id) return;
-      overrides.delete(id);
-      loadedFromPrevious = 0;
-      persist();
-      location.reload();
-    }
-  });
-
   function persist() {
     try {
       localStorage.setItem(
@@ -874,54 +1195,483 @@ const TABLE_ANSWERS = {{table_answers}};
     } catch (e) { /* ignore */ }
   }
 
-  const resetBtn = document.getElementById('reset-btn');
-  if (resetBtn) {
-    resetBtn.addEventListener('click', () => {
-      if (overrides.size === 0 && tableOverrides.size === 0) return;
-      const total = overrides.size + tableOverrides.size;
-      if (!confirm('Reset all ' + total + ' change(s)?')) return;
-      overrides.clear();
-      tableOverrides.clear();
-      loadedFromPrevious = 0;
-      try { localStorage.removeItem(STORAGE_KEY); }
-      catch (e) { /* ignore */ }
-      location.reload();
+  // ==========================================================
+  //  MULTI-SELECT MODE
+  // ==========================================================
+  let selectMode = false;
+  const selection = new Set();
+  let lastAnchorId = null;
+
+  const selectModeBtn = document.getElementById('select-mode-btn');
+  const selectionBar = document.getElementById('selection-bar');
+  const selCount = document.getElementById('sel-count');
+
+  function setSelectMode(on) {
+    selectMode = on;
+    selectModeBtn.classList.toggle('active', on);
+    selectModeBtn.textContent = on ? '✓ Select mode ON' : '✓ Select mode';
+    document.body.style.userSelect = on ? 'none' : '';
+    if (!on) clearSelection();
+  }
+
+  function clearSelection() {
+    for (const id of selection) {
+      const el = spanById(id);
+      if (el) el.classList.remove('selected');
+    }
+    selection.clear();
+    lastAnchorId = null;
+    updateSelectionUI();
+  }
+
+  function updateSelectionUI() {
+    selCount.textContent = selection.size + ' selected';
+    selectionBar.classList.toggle('visible', selection.size > 0);
+    document.querySelectorAll('.list-row').forEach(row => {
+      const id = row.getAttribute('data-span-id');
+      const cb = row.querySelector('.list-check');
+      if (!cb || !id) return;
+      const isSel = selection.has(id);
+      cb.checked = isSel;
+      row.classList.toggle('selected-row', isSel);
     });
   }
 
-  const saveBtn = document.getElementById('save-overrides-btn');
-  if (saveBtn) {
-    saveBtn.addEventListener('click', () => {
-      const spanPayload = {};
-      for (const [id, decision] of overrides.entries()) {
-        if (spanById(id)) spanPayload[id] = decision;
+  function selectSpan(id, add) {
+    const el = spanById(id);
+    if (!el) return;
+    if (add) {
+      selection.add(id);
+      el.classList.add('selected');
+    } else {
+      selection.delete(id);
+      el.classList.remove('selected');
+    }
+    lastAnchorId = id;
+    updateSelectionUI();
+  }
+
+  function toggleSelection(id) {
+    if (selection.has(id)) selectSpan(id, false);
+    else selectSpan(id, true);
+  }
+
+  function selectRange(fromId, toId) {
+    const all = Array.from(getAllSpans().keys());
+    const from = all.indexOf(fromId);
+    const to = all.indexOf(toId);
+    if (from === -1 || to === -1) return;
+    const [a, b] = from < to ? [from, to] : [to, from];
+    for (let i = a; i <= b; i++) {
+      selectSpan(all[i], true);
+    }
+    lastAnchorId = toId;
+  }
+
+  function bulkApply(decision) {
+    if (selection.size === 0) return;
+    const changes = [];
+    for (const id of selection) {
+      const el = spanById(id);
+      if (!el) continue;
+      const isNowCounted = el.classList.contains('count') || el.classList.contains('unit');
+      const targetCounted = decision === 'count';
+      if (isNowCounted !== targetCounted) {
+        changes.push({ kind: 'span', id, after: decision });
       }
-      const tablePayload = {};
-      for (const [idx, choice] of tableOverrides.entries()) {
-        tablePayload[idx] = choice;
+    }
+    if (changes.length === 0) return;
+    recordAndApply(changes);
+  }
+
+  selectModeBtn.addEventListener('click', () => setSelectMode(!selectMode));
+  document.getElementById('bulk-count-btn').addEventListener('click', () => bulkApply('count'));
+  document.getElementById('bulk-exclude-btn').addEventListener('click', () => bulkApply('exclude'));
+  document.getElementById('bulk-clear-btn').addEventListener('click', clearSelection);
+  document.getElementById('bulk-done-btn').addEventListener('click', () => {
+    clearSelection();
+    setSelectMode(false);
+  });
+
+  // ==========================================================
+  //  KEYBOARD SHORTCUTS
+  // ==========================================================
+  document.addEventListener('keydown', (e) => {
+    if (e.target.matches('input, select, textarea')) return;
+
+    // Ctrl/Cmd + Z = undo
+    if ((e.ctrlKey || e.metaKey) && !e.shiftKey && (e.key === 'z' || e.key === 'Z')) {
+      e.preventDefault();
+      undo();
+      return;
+    }
+    // Ctrl/Cmd + Y or Ctrl/Cmd + Shift + Z = redo
+    if ((e.ctrlKey || e.metaKey) && (e.key === 'y' || e.key === 'Y')) {
+      e.preventDefault();
+      redo();
+      return;
+    }
+    if ((e.ctrlKey || e.metaKey) && e.shiftKey && (e.key === 'z' || e.key === 'Z')) {
+      e.preventDefault();
+      redo();
+      return;
+    }
+
+    // S = toggle select mode
+    if ((e.key === 's' || e.key === 'S') && !e.ctrlKey && !e.metaKey && !e.altKey) {
+      e.preventDefault();
+      setSelectMode(!selectMode);
+      return;
+    }
+
+    if (e.key === 'Escape') {
+      if (selectMode) { clearSelection(); setSelectMode(false); }
+    }
+  });
+
+  // ==========================================================
+  //  MAIN CLICK HANDLER
+  // ==========================================================
+  document.addEventListener('click', (e) => {
+    const t = e.target;
+    if (!t.matches) return;
+
+    if (t.matches('.table-toggle') && (e.ctrlKey || e.metaKey)) {
+      e.preventDefault();
+      const idx = t.getAttribute('data-table-index');
+      if (!idx) return;
+      const spanNowCounted = t.classList.contains('count');
+      const targetChoice = spanNowCounted ? 'exclude_all' : 'count_all';
+      recordAndApply([{ kind: 'table', id: idx, after: targetChoice }]);
+      return;
+    }
+
+    if (t.matches('span.span-toggle')) {
+      const id = t.getAttribute('data-span-id');
+      if (!id) return;
+
+      if (e.ctrlKey || e.metaKey) {
+        e.preventDefault();
+        const isNowCounted = t.classList.contains('count') || t.classList.contains('unit');
+        recordAndApply([{ kind: 'span', id, after: isNowCounted ? 'exclude' : 'count' }]);
+        return;
       }
-      const body = JSON.stringify(
-        {
-          spans: spanPayload,
-          tables: tablePayload,
-          total: computeTotal(),
-        },
-        null,
-        2
-      );
-      const blob = new Blob([body], { type: 'application/json' });
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement('a');
-      a.href = url;
-      a.download = 'qcaa_overrides.json';
-      document.body.appendChild(a);
-      a.click();
-      document.body.removeChild(a);
-      URL.revokeObjectURL(url);
-      saveBtn.textContent = '✅ Downloaded';
-      setTimeout(() => { saveBtn.textContent = '💾 Save overrides'; }, 2000);
+
+      if (e.altKey) {
+        e.preventDefault();
+        overrides.delete(id);
+        loadedFromPrevious = 0;
+        persist();
+        location.reload();
+        return;
+      }
+
+      if (e.shiftKey) {
+        e.preventDefault();
+        if (lastAnchorId) selectRange(lastAnchorId, id);
+        else selectSpan(id, true);
+        if (!selectMode) setSelectMode(true);
+        return;
+      }
+
+      if (selectMode) {
+        e.preventDefault();
+        toggleSelection(id);
+        return;
+      }
+    }
+  });
+
+  // ==========================================================
+  //  LOW-CONFIDENCE + BROWSE-ALL LISTS
+  // ==========================================================
+  const LOW_CONF_THRESHOLD = 0.70;
+
+  // Build both master lists ONCE from the DOM.
+  // Each entry is one instance (span) — not unique words.
+  function buildMasterList(confFilter) {
+    const list = [];
+    const seen = new Set();
+    const spans = document.querySelectorAll('span.span-toggle[data-span-id]');
+    let docIndex = 0;
+    for (const el of spans) {
+      const id = el.getAttribute('data-span-id');
+      const confStr = el.getAttribute('data-confidence');
+      if (id && !seen.has(id) && confStr) {
+        const conf = parseFloat(confStr);
+        if (!isNaN(conf) && confFilter(conf)) {
+          seen.add(id);
+          list.push({
+            id, conf, docIndex,
+            text: el.getAttribute('data-text') || el.textContent,
+            rule: el.getAttribute('data-rule') || '',
+            reason: el.getAttribute('data-reason') || '',
+          });
+        }
+      }
+      docIndex++;
+    }
+    return list;
+  }
+  const lowConfAll = buildMasterList(c => c < LOW_CONF_THRESHOLD);
+  const everythingAll = buildMasterList(() => true);
+
+  function currentDecisionClass(id) {
+    const el = spanById(id);
+    if (!el) return 'flag';
+    if (el.classList.contains('count') || el.classList.contains('unit')) return 'count';
+    if (el.classList.contains('citation')) return 'citation';
+    if (el.classList.contains('exclude')) return 'exclude';
+    return 'flag';
+  }
+  function currentDecisionLabel(cls) {
+    if (cls === 'count') return 'counted';
+    if (cls === 'citation') return 'citation';
+    if (cls === 'exclude') return 'excluded';
+    return 'flagged';
+  }
+
+  function applyFilter(entries, filterVal) {
+    if (filterVal === 'count') {
+      return entries.filter(e => currentDecisionClass(e.id) === 'count');
+    }
+    if (filterVal === 'exclude') {
+      return entries.filter(e => {
+        const cls = currentDecisionClass(e.id);
+        return cls === 'exclude' || cls === 'citation';
+      });
+    }
+    return entries;
+  }
+  function applySort(entries, sortVal) {
+    const copy = entries.slice();
+    if (sortVal === 'asc') {
+      copy.sort((a, b) => a.conf - b.conf || a.docIndex - b.docIndex);
+    } else if (sortVal === 'desc') {
+      copy.sort((a, b) => b.conf - a.conf || a.docIndex - b.docIndex);
+    } else {
+      copy.sort((a, b) => a.docIndex - b.docIndex);
+    }
+    return copy;
+  }
+
+  function makeRow(entry) {
+    const cls = currentDecisionClass(entry.id);
+    const confPct = Math.round(entry.conf * 100);
+    const confClass = entry.conf < 0.50 ? 'low' : (entry.conf < 0.70 ? 'mid' : 'high');
+
+    const row = document.createElement('div');
+    row.className = 'list-row';
+    row.setAttribute('data-span-id', entry.id);
+    if (selection.has(entry.id)) row.classList.add('selected-row');
+
+    const cb = document.createElement('input');
+    cb.type = 'checkbox';
+    cb.className = 'list-check';
+    cb.checked = selection.has(entry.id);
+
+    const confBadge = document.createElement('span');
+    confBadge.className = 'low-conf-conf ' + confClass;
+    confBadge.textContent = confPct + '%';
+
+    const word = document.createElement('span');
+    word.className = 'low-conf-word';
+    word.textContent = entry.text;
+    word.title = entry.text + ' — ' + entry.reason;
+    word.addEventListener('click', () => jumpToSpan(entry.id));
+
+    const rule = document.createElement('span');
+    rule.className = 'low-conf-rule';
+    rule.textContent = entry.rule;
+
+    const dec = document.createElement('span');
+    dec.className = 'low-conf-decision ' + cls;
+    dec.textContent = currentDecisionLabel(cls);
+
+    const jump = document.createElement('button');
+    jump.className = 'low-conf-jump';
+    jump.type = 'button';
+    jump.textContent = 'Jump';
+    jump.addEventListener('click', () => jumpToSpan(entry.id));
+
+    row.append(cb, confBadge, word, rule, dec, jump);
+    return row;
+  }
+
+  function jumpToSpan(id) {
+    const el = spanById(id);
+    if (!el) return;
+    el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    el.classList.remove('flash-highlight');
+    void el.offsetWidth;
+    el.classList.add('flash-highlight');
+    setTimeout(() => el.classList.remove('flash-highlight'), 2000);
+  }
+
+  // --- Low-confidence list ---
+  const lowConfList = document.getElementById('low-conf-list');
+  const lowConfEmpty = document.getElementById('low-conf-empty');
+  const lowConfCountEl = document.getElementById('low-conf-count');
+  const lowConfBadge = document.getElementById('low-conf-badge');
+  const lowConfSort = document.getElementById('low-conf-sort');
+  const lowConfFilter = document.getElementById('low-conf-filter');
+
+  function rebuildLowConfList() {
+    // Only spans that haven't been overridden yet
+    let visible = lowConfAll.filter(e => !overrides.has(e.id));
+    visible = applyFilter(visible, lowConfFilter.value);
+    visible = applySort(visible, lowConfSort.value);
+
+    lowConfList.innerHTML = '';
+    if (visible.length === 0) {
+      lowConfEmpty.style.display = 'block';
+      lowConfCountEl.textContent = '';
+    } else {
+      lowConfEmpty.style.display = 'none';
+      lowConfCountEl.textContent = visible.length + ' of ' + lowConfAll.length + ' remaining';
+    }
+    for (const entry of visible) {
+      lowConfList.appendChild(makeRow(entry));
+    }
+
+    const remaining = lowConfAll.filter(e => !overrides.has(e.id)).length;
+    if (remaining === 0) {
+      lowConfBadge.textContent = 'all reviewed';
+      lowConfBadge.className = 'badge badge-good';
+    } else {
+      lowConfBadge.textContent = remaining + ' to review';
+      lowConfBadge.className = 'badge badge-warn';
+    }
+  }
+
+  lowConfSort.addEventListener('change', rebuildLowConfList);
+  lowConfFilter.addEventListener('change', rebuildLowConfList);
+
+  // --- Browse-all list ---
+  const browseAllPanel = document.getElementById('browse-all-panel');
+  const browseAllList = document.getElementById('browse-all-list');
+  const browseAllCountEl = document.getElementById('browse-all-count-label');
+  const browseAllBadge = document.getElementById('browse-all-count');
+  const browseAllSort = document.getElementById('browse-all-sort');
+  const browseAllFilter = document.getElementById('browse-all-filter');
+  let browseAllDirty = true;
+
+  function renderBrowseAll() {
+    let visible = everythingAll.slice();
+    visible = applyFilter(visible, browseAllFilter.value);
+    visible = applySort(visible, browseAllSort.value);
+
+    browseAllList.innerHTML = '';
+    if (visible.length === 0) {
+      browseAllCountEl.textContent = '(nothing matches the filter)';
+    } else {
+      browseAllCountEl.textContent = visible.length + ' of ' + everythingAll.length + ' words';
+    }
+    for (const entry of visible) {
+      browseAllList.appendChild(makeRow(entry));
+    }
+    browseAllBadge.textContent = everythingAll.length + ' words';
+  }
+
+  browseAllSort.addEventListener('change', () => { browseAllDirty = true; renderBrowseAll(); });
+  browseAllFilter.addEventListener('change', () => { browseAllDirty = true; renderBrowseAll(); });
+  browseAllPanel.addEventListener('toggle', () => {
+    if (browseAllPanel.open && browseAllDirty) {
+      renderBrowseAll();
+      browseAllDirty = false;
+    }
+  });
+  function markBrowseAllDirty() {
+    browseAllDirty = true;
+    if (browseAllPanel && browseAllPanel.open) {
+      renderBrowseAll();
+      browseAllDirty = false;
+    }
+  }
+
+  // --- Checkbox change delegation (one listener per container) ---
+  function attachListDelegation(container) {
+    container.addEventListener('change', (e) => {
+      if (!e.target.matches('.list-check')) return;
+      const row = e.target.closest('.list-row');
+      if (!row) return;
+      const id = row.getAttribute('data-span-id');
+      if (!id) return;
+      if (e.target.checked) selectSpan(id, true);
+      else selectSpan(id, false);
     });
   }
+  attachListDelegation(lowConfList);
+  attachListDelegation(browseAllList);
+
+  // Select all visible
+  document.getElementById('low-conf-select-all').addEventListener('click', () => {
+    if (!selectMode) setSelectMode(true);
+    document.querySelectorAll('#low-conf-list .list-row').forEach(row => {
+      const id = row.getAttribute('data-span-id');
+      if (id && !selection.has(id)) selectSpan(id, true);
+    });
+  });
+  document.getElementById('browse-all-select-all').addEventListener('click', () => {
+    if (!selectMode) setSelectMode(true);
+    document.querySelectorAll('#browse-all-list .list-row').forEach(row => {
+      const id = row.getAttribute('data-span-id');
+      if (id && !selection.has(id)) selectSpan(id, true);
+    });
+  });
+
+  document.getElementById('low-conf-clear-selection').addEventListener('click', clearSelection);
+  document.getElementById('browse-all-clear-selection').addEventListener('click', clearSelection);
+
+  // ==========================================================
+  //  RESET BUTTON
+  // ==========================================================
+  const resetBtn = document.getElementById('reset-btn');
+  resetBtn.addEventListener('click', () => {
+    const total = overrides.size + tableOverrides.size;
+    if (total === 0) return;
+    if (!confirm('Reset all ' + total + ' toggle(s)?')) return;
+    try { localStorage.removeItem(STORAGE_KEY); }
+    catch (e) { /* ignore */ }
+    location.reload();
+  });
+
+  // ==========================================================
+  //  SAVE OVERRIDES
+  // ==========================================================
+  const saveBtn = document.getElementById('save-overrides-btn');
+  saveBtn.addEventListener('click', () => {
+    const spanPayload = {};
+    for (const [id, decision] of overrides.entries()) {
+      if (spanById(id)) spanPayload[id] = decision;
+    }
+    const tablePayload = {};
+    for (const [idx, choice] of tableOverrides.entries()) {
+      tablePayload[idx] = choice;
+    }
+    const body = JSON.stringify(
+      { spans: spanPayload, tables: tablePayload, total: computeTotal() },
+      null, 2
+    );
+    const blob = new Blob([body], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = 'qcaa_overrides.json';
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+    saveBtn.textContent = '✅ Downloaded';
+    setTimeout(() => { saveBtn.textContent = '💾 Save overrides'; }, 2000);
+  });
+
+  // ==========================================================
+  //  INIT
+  // ==========================================================
+  updateUndoRedoButtons();
+  rebuildLowConfList();
+  updateSelectionUI();
 })();
 </script>
 

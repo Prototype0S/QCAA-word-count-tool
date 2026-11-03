@@ -32,8 +32,6 @@ fail() {
 }
 
 # --- macOS Gatekeeper quarantine check ------------------------------
-# Sequoia (15) and later removed the right-click → Open bypass.
-# The user must go through System Settings → Privacy & Security.
 if xattr -l "$0" 2>/dev/null | grep -q "com.apple.quarantine"; then
     echo
     echo "============================================================"
@@ -61,8 +59,6 @@ if xattr -l "$0" 2>/dev/null | grep -q "com.apple.quarantine"; then
 fi
 
 # --- Executable bit check -------------------------------------------
-# If the file arrived via a Windows zip, it won't be executable and
-# Finder opens it in TextEdit instead of running it.
 if [ ! -x "$0" ]; then
     echo
     echo "============================================================"
@@ -120,9 +116,6 @@ if [ -z "$PY" ]; then
     echo "  Install Python 3.15 (current stable) from:"
     echo "      https://www.python.org/downloads/"
     echo
-    echo "  The python.org installer includes tkinter, so the file"
-    echo "  picker will work without any extra setup."
-    echo
     pause
     exit 1
 fi
@@ -159,10 +152,23 @@ if ! "$VENV_PY" -c 'import docx, docx.opc' >/dev/null 2>&1; then
     fi
 fi
 
+# --- Smoke test -----------------------------------------------------
+# Quiet on success, loud on failure.
+if [ -f "selftest.py" ]; then
+    if ! "$VENV_PY" selftest.py >/dev/null 2>&1; then
+        echo
+        echo "WARNING: The tool's own sanity check failed."
+        echo "         The installer worked but the tool may not run."
+        echo "         Details:"
+        echo
+        "$VENV_PY" selftest.py
+        echo
+        pause
+        exit 1
+    fi
+fi
+
 # --- Fallback file picker if tkinter is missing ---------------------
-# python.org installers include tkinter; Homebrew usually does not.
-# NOTE: the "of type" restriction was removed because some macOS
-# versions silently reject it and show no picker at all.
 if [ $# -eq 0 ] && ! "$VENV_PY" -c 'import tkinter' >/dev/null 2>&1; then
     echo "This Python has no tkinter, so the built-in picker is unavailable."
     echo "Choose your .docx in the dialog instead:"
