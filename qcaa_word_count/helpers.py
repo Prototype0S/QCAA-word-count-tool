@@ -213,7 +213,7 @@ _UNIT_ONLY_RE = re.compile(
     r"^(?:kg|g|mg|µg|μg|m|cm|mm|km|nm|µm|μm|s|ms|h|hr|hrs|min|mins|"
     r"L|mL|dL|cL|µL|μL|mol|mmol|µmol|μmol|K|N|J|kJ|MJ|W|kW|V|mV|"
     r"A|mA|Pa|kPa|MPa|Hz|kHz|MHz|rad|sr|cd|lm|lx|Bq|Gy|Sv|kat|bar|atm|psi|"
-    r"°C|°F|℃|℉)$"
+    r"°C|°|°F|℃|℉)$"
 )
 
 _ORDINAL_RE = re.compile(r"^-?\d+(?:st|nd|rd|th)$", re.IGNORECASE)
