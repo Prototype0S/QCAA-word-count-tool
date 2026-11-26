@@ -165,6 +165,11 @@ def _apply_user_overrides(document: Document, overrides: dict) -> None:
                    f"span no longer present)"))
 
 
+def _default_html_path(docx_path: str) -> str:
+    """Preview path when the user didn't pass --html-path: next to the .docx."""
+    return f"{os.path.splitext(docx_path)[0]}_qcaa_preview.html"
+
+
 def _prepare(path: str) -> Document:
     document = ingest(path)
     for table in document.tables:
@@ -282,7 +287,9 @@ def run(path: str, *, mode: str = "interactive",
         result = count_words(document)
         _snapshot_sections(document, result)
         html_file = write_html_preview(
-            document, result, output_path=html_path, open_browser=open_browser,
+            document, result,
+            output_path=html_path or _default_html_path(path),
+            open_browser=open_browser,
         )
         print()
         print(f"{bold('HTML preview written to:')} {cyan(html_file)}")
@@ -343,11 +350,13 @@ def run(path: str, *, mode: str = "interactive",
     print_ansi_preview(document)
     print()
     html_file = write_html_preview(
-        document, result, output_path=html_path, open_browser=open_browser,
+        document, result,
+        output_path=html_path or _default_html_path(path),
+        open_browser=open_browser,
     )
     print(f"{bold('HTML preview written to:')} {cyan(html_file)}")
     if not open_browser:
-        print(grey("  (Use --open to open it in your browser.)"))
+        print(grey("  (Browser opening skipped — --no-open was used.)"))
     print()
     print_report(document, result)
 

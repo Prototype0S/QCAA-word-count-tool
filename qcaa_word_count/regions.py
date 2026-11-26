@@ -111,7 +111,34 @@ def detect_regions(document: Document) -> None:
         else:
             block.region = current_region
 
+    _rescue_untitled_document(document)
     _detect_trailing_references(document)
+
+
+def _rescue_untitled_document(document: Document) -> None:
+    """Safety valve: never let the title-page window swallow everything.
+
+    The opening window closes on the first prose block (two sentences, or
+    one sentence of 15+ words) or the first Heading-style paragraph. A
+    document whose body opens with short paragraphs and uses no Heading
+    styles — common when text is pasted from Google Docs — trips none of
+    those, so every block stayed TITLE_PAGE and the tool reported a
+    0-word response.
+
+    If *all* non-empty blocks are TITLE_PAGE and there is no stated
+    word-count line (which is the signature of a real cover page), treat
+    the content as body. A genuine cover page normally states a word
+    count, and one that doesn't is far rarer than a short body opening.
+    """
+    nonempty = [b for b in document.blocks if b.text.strip()]
+    if not nonempty:
+        return
+    if any(b.region != Region.TITLE_PAGE for b in nonempty):
+        return
+    if any(_STATED_COUNT_LINE_RE.search(b.text) for b in nonempty):
+        return
+    for block in nonempty:
+        block.region = Region.BODY
 
 
 def assign_table_regions(document: Document) -> None:
@@ -173,7 +200,9 @@ _REFERENCE_AUTHOR_YEAR_RE = re.compile(
     r"(?:\s*,\s*[A-Z]\.?)?"
     r"(?:\s*,?\s*(?:&|and)\s+[A-Z][A-Za-z'’\-]+"
     r"(?:\s*,\s*[A-Z]\.?)?)?"
-    r"(?:\s+[A-Z][A-Za-z'’\-]+){0,6}"
+    # Organisation names interleave lowercase connectors, e.g.
+    # "Australian Bureau of Statistics (2026)."
+    r"(?:\s+(?:[A-Z][A-Za-z'’\-]+|of|the|and|for|in|on|at|to|de|van|von)){0,6}"
     r"\s*\(\s*(?:19|20)\d{2}[a-z]?\s*\)\s*\."
 )
 
@@ -184,6 +213,13 @@ _URL_LIKE_RE = re.compile(
 )
 
 _URL_START_RE = re.compile(r"https?://|www\.", re.IGNORECASE)
+
+# Sentence ends for reference detection: a full stop only counts when it
+# is followed by a capitalised sentence or the end of the block. Messy
+# entries like "Australian Bureau of Statistics. . (2026)." contain stray
+# periods that would otherwise inflate the count and demote a reference
+# to prose.
+_REF_SENTENCE_RE = re.compile(r"[.!?](?=\s+[A-Z]|\s*$)")
 
 _REFERENCE_HINT_RE = re.compile(
     r"\b(?:Retrieved|Accessed|Available\s+(?:at|from)|Published|"
@@ -208,10 +244,12 @@ def _looks_like_reference(text: str) -> bool:
     # --- URL present -------------------------------------------------
     if _URL_LIKE_RE.search(text):
         url_starts = len(_URL_START_RE.findall(text))
-        sentences = len(_SENTENCE_END_RE.findall(text))
+        sentences = len(_REF_SENTENCE_RE.findall(text))
         if url_starts >= 2:
             return True
-        if sentences <= 6:
+        # A reference entry with a URL is a line or two, not a paragraph
+        # of running prose that happens to cite a link.
+        if sentences <= 3:
             return True
         return False
 

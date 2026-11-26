@@ -9,6 +9,7 @@ from __future__ import annotations
 import html
 import json
 import os
+import sys
 from pathlib import Path
 
 from ..helpers import heading_level_from_style
@@ -503,9 +504,34 @@ def write_html_preview(document: Document, result: dict,
         output_path = f"{base}_qcaa_preview.html"
     Path(output_path).write_text(html_text, encoding="utf-8")
     if open_browser:
-        try:
-            import webbrowser
-            webbrowser.open(f"file://{os.path.abspath(output_path)}")
-        except Exception:
-            pass
+        _open_in_browser(Path(output_path))
     return output_path
+
+
+def _open_in_browser(path: Path) -> bool:
+    """Open a local file in the default browser.
+
+    The path must go through Path.as_uri(): hand-building "file://" plus
+    os.path.abspath() gives "file://C:\\Users\\..." which is not a valid
+    URI -- the drive letter is parsed as the host, the separators are
+    backslashes, and any space in the path is unencoded. Some handlers
+    salvage it and some reject it silently, so the same call can open or
+    do nothing depending on the interpreter.
+
+    os.startfile() is the fallback: it hands the file to the shell, which
+    uses the normal .html association and ignores webbrowser's
+    registry-derived handler list entirely.
+    """
+    try:
+        import webbrowser
+        if webbrowser.open(path.resolve().as_uri()):
+            return True
+    except Exception as exc:  # noqa: BLE001 - never let previewing fail
+        print(f"warning: browser launch failed: {exc}", file=sys.stderr)
+
+    try:
+        os.startfile(str(path))  # type: ignore[attr-defined]
+        return True
+    except (OSError, AttributeError) as exc:
+        print(f"warning: could not open {path}: {exc}", file=sys.stderr)
+        return False

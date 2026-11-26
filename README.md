@@ -15,7 +15,7 @@ included. This script automates the parts of that distinction that a computer
 genuinely need a human judgement call.
 
 I've made sure to try to make it super user friendly, using rich text to add colours to make things a bit more fun!
-> **Power users**: see [ADVANCED.md](./ADVANCED.md) for terminal usage,
+> **Power users**: see [advanced.md](./advanced.md) for terminal usage,
 > flag reference, and workflows.
 
 ## What it automates
@@ -96,6 +96,6 @@ and any citation style the pattern-matcher might not recognise.
 ## Contributing
 
 Issues and pull requests welcome — in particular around detecting
-additional citation styles, text box / nested table support, and page-count
-exclusions.
+additional citation styles, text box / nested table support, and extracting
+text from figures and diagrams.
 Please ask any question or leave any comments in the **Discussions** section, I will do my best to answer them!

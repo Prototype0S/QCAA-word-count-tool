@@ -22,6 +22,21 @@ def _is_inside_math(node) -> bool:
     return False
 
 
+def _is_inside_text_box(node) -> bool:
+    """True if ``node`` lives inside a ``w:txbxContent`` subtree.
+
+    Text boxes are extracted separately by ``paragraph_text_boxes`` and
+    become their own ``TEXT_BOX`` blocks. Without this check their text
+    is also picked up by the host paragraph's normal text walk, so the
+    same words would be counted twice.
+    """
+    from docx.oxml.ns import qn
+    for ancestor in node.iterancestors():
+        if ancestor.tag == qn("w:txbxContent"):
+            return True
+    return False
+
+
 def _needs_space(prev_chunk: str, next_chunk: str) -> bool:
     if not prev_chunk or not next_chunk:
         return False
@@ -32,7 +47,9 @@ def _needs_space(prev_chunk: str, next_chunk: str) -> bool:
     return last.isalnum() and first.isalnum()
 
 
-def _extract_text_from_element(element) -> tuple[str, int]:
+def _extract_text_from_element(
+    element, *, skip_text_boxes: bool = True,
+) -> tuple[str, int]:
     from docx.oxml.ns import qn
     parts: list[str] = []
     math_count = 0
@@ -40,6 +57,10 @@ def _extract_text_from_element(element) -> tuple[str, int]:
 
     for node in element.iter():
         tag = node.tag
+        # Text boxes are their own blocks; don't also count them as part
+        # of the paragraph (or cell) that hosts them.
+        if skip_text_boxes and _is_inside_text_box(node):
+            continue
         if tag in (qn("m:oMath"), qn("m:oMathPara")):
             node_id = id(node)
             if node_id not in seen_math_roots:
@@ -70,7 +91,9 @@ def paragraph_text_boxes(para) -> list[tuple[str, int]]:
     results: list[tuple[str, int]] = []
     for node in para._element.iter():
         if node.tag == qn("w:txbxContent"):
-            text, math_count = _extract_text_from_element(node)
+            text, math_count = _extract_text_from_element(
+                node, skip_text_boxes=False,
+            )
             if text.strip() or math_count:
                 results.append((text, math_count))
     return results

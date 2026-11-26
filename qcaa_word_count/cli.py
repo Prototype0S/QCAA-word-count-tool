@@ -2,10 +2,8 @@
 from __future__ import annotations
 
 import argparse
-import os
-import sys
+import json
 
-from .interactive import resolve_all
 from .output import bold, bold_cyan, cyan, dim, green, grey, red, yellow
 from .pipeline import run
 from .tutorial import run_tutorial_if_first_time
@@ -35,9 +33,9 @@ EXCLUDED:
   - blank pages
 
 NOTE ON UNITS:
-  "5 kg" counts one word (the unit); "5kg" counts zero (number+unit
-  is treated as one number token). Both are the literal reading of
-  the QCAA rule, not a bug.
+  A unit counts even when glued to its number: "5 kg" is one word
+  (the "5" is a number and is excluded) and "5kg" is also one word
+  (counted as a measurement). Symbols and equations never count.
 """
 
 
@@ -115,7 +113,13 @@ def _pick_file() -> str | None:
     return path or None
 
 
-def main(argv: list[str] | None = None) -> int:
+def _build_parser() -> argparse.ArgumentParser:
+    """Build the argument parser.
+
+    Extracted from ``main`` so the flag contract (in particular the
+    ``--open`` / ``--no-open`` default) can be unit-tested without
+    running the whole pipeline.
+    """
     parser = argparse.ArgumentParser(
         prog="qcaa_word_count.py",
         description="Estimate the QCAA word count of a .docx response.",
@@ -146,10 +150,14 @@ def main(argv: list[str] | None = None) -> int:
                         help="Delete saved decisions, then run normally")
 
     # Output
-    parser.add_argument("--open", action="store_true",
-                        help="Open the HTML preview in the browser (default)")
-    parser.add_argument("--no-open", action="store_true",
-                        help="Don't open the HTML preview")
+    # One destination, two flags: --no-open turns browser opening off and
+    # --open turns it back on. The default is to open, because the HTML
+    # preview is the main way the tool is meant to be read.
+    parser.add_argument("--open", dest="open_browser", action="store_true",
+                        default=True,
+                        help="Open the HTML preview in your browser (default)")
+    parser.add_argument("--no-open", dest="open_browser", action="store_false",
+                        help="Write the HTML preview but don't open it")
     parser.add_argument("--html-path", help="Path for the HTML preview")
     parser.add_argument("--report", choices=["json", "csv"],
                         help="Export a full decision log")
@@ -161,7 +169,48 @@ def main(argv: list[str] | None = None) -> int:
                         help="Print the QCAA rules and exit")
     parser.add_argument("--tutorial", action="store_true",
                         help="Re-run the first-run tutorial")
+    return parser
+
+
+def _load_overrides(path: str) -> dict | None:
+    """Read a qcaa_overrides.json file produced by the HTML preview.
+
+    Returns the raw payload (``{"spans": {...}, "tables": {...},
+    "total": N}``) and lets ``pipeline._apply_user_overrides`` normalise
+    the shape, so there is exactly one place that understands the
+    format. Older flat/legacy files are passed through unchanged.
+    """
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            payload = json.load(f)
+    except (OSError, json.JSONDecodeError) as e:
+        print(red(f"Couldn't read overrides file: {e}"))
+        return None
+    if not isinstance(payload, dict):
+        print(red("Overrides file must contain a JSON object."))
+        return None
+
+    spans = payload.get("spans") or {}
+    tables = payload.get("tables") or {}
+    applied = len(spans) + len(tables)
+    if applied:
+        print(grey(f"  Applying {applied} override(s) from {path}"))
+    elif payload.get("overrides"):
+        print(grey(f"  Applying overrides from {path}"))
+    else:
+        print(yellow(f"  No span or table overrides found in {path}."))
+    return payload
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = _build_parser()
     args = parser.parse_args(argv)
+
+    overrides = None
+    if args.apply_overrides:
+        overrides = _load_overrides(args.apply_overrides)
+        if overrides is None:
+            return 2
 
     if args.explain:
         print(QCAA_RULES_TEXT)
@@ -170,18 +219,6 @@ def main(argv: list[str] | None = None) -> int:
     if args.tutorial:
         run_tutorial_if_first_time(force=True)
         return 0
-    if args.apply_overrides:
-        try:
-            with open(args.apply_overrides, "r", encoding="utf-8") as f:
-                payload = json.load(f)
-        except (OSError, json.JSONDecodeError) as e:
-            print(red(f"Couldn't read overrides file: {e}"))
-            return 2
-        overrides = payload.get("overrides", {})
-        if overrides:
-            print(grey(f"  Applying {len(overrides)} override(s) from "
-                       f"{args.apply_overrides}"))
-            # Defer to run() — pass through
 
     # First-run tutorial (only if no preset flag was given)
     preset_given = any([args.summary, args.preview_only, args.check,
@@ -214,17 +251,11 @@ def main(argv: list[str] | None = None) -> int:
             return 0
         mode = chosen
 
-    # [FIX 2] --open was previously a no-op. --no-open still wins if both given.
-    if args.no_open:
-        open_browser = False
-    else:
-        open_browser = True
-
     return run(
         path,
         mode=mode,
         auto_accept=False,
-        open_browser=open_browser,
+        open_browser=args.open_browser,
         save=not args.no_save,
         load=not args.no_load,
         reset=args.reset,
@@ -232,5 +263,5 @@ def main(argv: list[str] | None = None) -> int:
         export_format=args.report,
         export_path=args.report_path,
         html_path=args.html_path,
-        overrides=overrides if 'overrides' in locals() else None,
+        overrides=overrides,
     )

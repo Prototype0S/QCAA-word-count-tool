@@ -59,7 +59,8 @@ CHANGELOG (this version)
     - Fixes caption detection to reject only prose-like continuations,
       not all captions containing "shows"/"illustrates"/etc.
     - Removes dead code in looks_like_caption
-    - Stops auto-opening the browser; use --open to opt in
+    - HTML preview still opens in the browser by default; --open forces
+      it, --no-open suppresses it
     - Adds tests covering each genre and edge case
     - Preserves ANSI preview as the default output
 """

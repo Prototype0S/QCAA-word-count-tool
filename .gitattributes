@@ -1,2 +1,7 @@
-# Auto detect text files and perform LF normalization
-* text=auto
+# Auto detect text files and perform LF normalization.
+# Pinning eol=lf stops core.autocrlf=true from writing CRLF on checkout,
+# which made unchanged files show up as modified.
+* text=auto eol=lf
+
+# The tool's inputs are binary documents; never touch their bytes.
+*.docx binary
